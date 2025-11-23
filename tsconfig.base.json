@@ -1,0 +1,28 @@
+{
+    "compilerOptions": {
+        "target": "es2020",
+        "module": "commonjs",
+        "lib": [
+            "es2020",
+            "dom"
+        ],
+        "declaration": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "moduleResolution": "node",
+        "resolveJsonModule": true,
+        "composite": true,
+        "baseUrl": ".",
+        "paths": {
+            "@moovia/domain": [
+                "packages/domain/src/index.ts"
+            ]
+        }
+    },
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}

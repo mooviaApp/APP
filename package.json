@@ -1,0 +1,32 @@
+{
+  "name": "moovia-monorepo",
+  "version": "1.0.0",
+  "description": "Dashboard y aplicacion del sensor de seguimiento de la barra en movimiento de halterofilia.",
+  "main": "index.js",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm run start:dev --workspace=apps/backend",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:mobile": "npm run start --workspace=apps/mobile",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:web\" \"npm run dev:mobile\"",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mooviaApp/APP.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "bugs": {
+    "url": "https://github.com/mooviaApp/APP/issues"
+  },
+  "homepage": "https://github.com/mooviaApp/APP#readme"
+}

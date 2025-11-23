@@ -1,0 +1,11 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@moovia/domain": [
+        "../../packages/domain/src/index.ts"
+      ]
+    }
+  }
+}
