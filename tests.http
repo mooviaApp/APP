@@ -1,0 +1,156 @@
+### ============================
+### Variables globales
+### ============================
+@baseUrl = http://localhost:3000
+@userId = cmibx9guz0000r0pgfnmwaflp
+
+
+### ============================
+### 1) Get all users
+### ============================
+GET {{baseUrl}}/users
+
+
+### ============================
+### 2) Get user by ID
+### ============================
+GET {{baseUrl}}/users/{{userId}}
+
+
+### ============================
+### 3) Create workout session (Snatch)
+###    Guarda el ID de la sesión como variable
+### ============================
+# @name snatchSession
+POST {{baseUrl}}/workouts
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "exercise": "Snatch"
+}
+
+### Después de ejecutar esta request,
+### podrás usar {{snatchSession.response.body.$.id}}
+### como sessionId en el resto de peticiones.
+
+
+### ============================
+### 4) Add first set to Snatch session
+###    Guarda el ID del set como variable
+### ============================
+# @name snatchSet1
+POST {{baseUrl}}/workouts/{{snatchSession.response.body.$.id}}/sets
+Content-Type: application/json
+
+{
+  "weight": 80,
+  "reps": 3
+}
+
+
+### ============================
+### 5) Add another set to Snatch session
+### ============================
+POST {{baseUrl}}/workouts/{{snatchSession.response.body.$.id}}/sets
+Content-Type: application/json
+
+{
+  "weight": 85,
+  "reps": 2
+}
+
+
+### ============================
+### 6) Get Snatch workout session with sets
+### ============================
+GET {{baseUrl}}/workouts/{{snatchSession.response.body.$.id}}
+
+
+
+### ============================
+### 7) Create workout session (Clean & Jerk)
+###    Segunda sesión, con otra variable
+### ============================
+# @name cjSession
+POST {{baseUrl}}/workouts
+Content-Type: application/json
+
+{
+  "userId": "{{userId}}",
+  "exercise": "Clean & Jerk"
+}
+
+
+### ============================
+### 8) Add set to Clean & Jerk session
+### ============================
+POST {{baseUrl}}/workouts/{{cjSession.response.body.$.id}}/sets
+Content-Type: application/json
+
+{
+  "weight": 90,
+  "reps": 1
+}
+
+
+### ============================
+### 9) Get Clean & Jerk workout session with sets
+### ============================
+GET {{baseUrl}}/workouts/{{cjSession.response.body.$.id}}
+
+
+### ============================
+### 10) Upload sensor data for Snatch set
+###     Simula datos del acelerómetro/giroscopio
+### ============================
+# Usa la sesión Snatch y el primer set creado (snatchSet1)
+POST {{baseUrl}}/workouts/{{snatchSession.response.body.$.id}}/sets/{{snatchSet1.response.body.$.id}}/sensor
+Content-Type: application/json
+
+{
+  "deviceId": "moovia-device-001",
+  "samples": [
+    {
+      "timestamp": "2025-11-23T16:59:00.000Z",
+      "ax": 0.12,
+      "ay": 0.03,
+      "az": 9.81,
+      "gx": 0.01,
+      "gy": -0.02,
+      "gz": 0.00
+    },
+    {
+      "timestamp": "2025-11-23T16:59:00.010Z",
+      "ax": 0.15,
+      "ay": 0.02,
+      "az": 9.76,
+      "gx": 0.02,
+      "gy": -0.01,
+      "gz": 0.01
+    },
+    {
+      "timestamp": "2025-11-23T16:59:00.020Z",
+      "ax": 0.18,
+      "ay": 0.01,
+      "az": 9.72,
+      "gx": 0.03,
+      "gy": 0.00,
+      "gz": 0.02
+    }
+  ]
+}
+
+
+### ============================
+### 11) Get sensor data for Snatch set
+###     Retrieve all sensor samples for the first set
+### ============================
+GET {{baseUrl}}/workouts/{{snatchSession.response.body.$.id}}/sets/{{snatchSet1.response.body.$.id}}/sensor
+
+
+### ============================
+### 12) Get metrics for Snatch set
+###     Calculate reps, velocities from sensor data
+### ============================
+GET {{baseUrl}}/workouts/{{snatchSession.response.body.$.id}}/sets/{{snatchSet1.response.body.$.id}}/metrics

@@ -1,0 +1,22 @@
+-- CreateTable
+CREATE TABLE "SensorPacket" (
+    "id" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "setId" TEXT NOT NULL,
+    "deviceId" TEXT,
+    "timestamp" TIMESTAMP(3) NOT NULL,
+    "ax" DOUBLE PRECISION NOT NULL,
+    "ay" DOUBLE PRECISION NOT NULL,
+    "az" DOUBLE PRECISION NOT NULL,
+    "gx" DOUBLE PRECISION NOT NULL,
+    "gy" DOUBLE PRECISION NOT NULL,
+    "gz" DOUBLE PRECISION NOT NULL,
+
+    CONSTRAINT "SensorPacket_pkey" PRIMARY KEY ("id")
+);
+
+-- AddForeignKey
+ALTER TABLE "SensorPacket" ADD CONSTRAINT "SensorPacket_setId_fkey" FOREIGN KEY ("setId") REFERENCES "Set"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "SensorPacket" ADD CONSTRAINT "SensorPacket_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Device"("id") ON DELETE SET NULL ON UPDATE CASCADE;
