@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
 
 :root {
   /* MOOVIA Color Palette */
@@ -10,11 +10,11 @@
   --color-brown: #9B5546;
   --color-dark-card: #504670;
   --color-blue-card: #227DA3;
-  
+
   /* Dark Theme */
   --background: #05060A;
   --foreground: #F9FAFB;
-  
+
   /* Font */
   --font-quicksand: 'Quicksand', sans-serif;
 }
@@ -23,7 +23,7 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-quicksand);
-  
+
   /* MOOVIA Colors */
   --color-moovia-primary: var(--color-primary);
   --color-moovia-accent: var(--color-accent);
