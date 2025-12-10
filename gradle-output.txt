@@ -1,0 +1,47 @@
+﻿.\android\gradlew.bat : 
+En línea: 1 Carácter: 1
++ .\android\gradlew.bat -p 
+android assembleDebug 2>&1 
+| Out-File -Encod ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          
+    : NotSpecified: (:Stri  
+  ng) [], RemoteException
+    + FullyQualifiedErrorId 
+    : NativeCommandError
+ 
+FAILURE: Build failed with 
+an exception.
+
+* Where:
+Settings file 'C:\Users\abra
+h\OneDrive\Escritorio\La Sal
+le\7mo\TFG_DOCUMENTACIËN\ARC
+HIVOS_VSCODE\APP\android\set
+tings.gradle' line: 21
+
+* What went wrong:
+Error resolving plugin [id: 
+'com.facebook.react.settings
+']
+> Included build 'C:\Users\a
+brah\OneDrive\Escritorio\La 
+Salle\7mo\TFG_DOCUMENTACI├ôN
+\ARCHIVOS_VSCODE\APP\node_mo
+dules\@react-native\gradle-p
+lugin' does not exist.
+
+* Try:
+> Run with --stacktrace 
+option to get the stack 
+trace.
+> Run with --info or 
+--debug option to get more 
+log output.
+> Run with --scan to get 
+full insights.
+> Get more help at 
+https://help.gradle.org.
+
+BUILD FAILED in 1s

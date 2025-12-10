@@ -36,6 +36,7 @@ yarn-error.log*
 
 # Next.js
 .next/
+!android-build.log
 *.log
 
 # NestJS

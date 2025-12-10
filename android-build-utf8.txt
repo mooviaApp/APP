@@ -1,0 +1,205 @@
+﻿node.exe : npm 
+verbose cli 
+C:\Program Files\node
+js\node.exe C:\Users\
+abrah\AppData\Roaming
+\npm\node_modules\npm
+\bin\npm-cli.js
+En C:\Program Files\n
+odejs\npm.ps1: 29 
+Carácter: 3
++   & $NODE_EXE 
+$NPM_CLI_JS $args
++   ~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~
+    + CategoryInfo   
+           : NotSpe  
+  cified: (npm ver   
+ bose cli...\bin\    
+npm-cli.js:Strin    
+g) [], RemoteExc    
+eption
+    + FullyQualified 
+   ErrorId : Native  
+  CommandError
+ 
+npm info using 
+npm@11.5.2
+npm info using 
+node@v22.12.0
+npm verbose title 
+npm run android
+npm verbose argv 
+"run" "android" 
+"--loglevel" 
+"verbose"
+npm verbose logfile 
+logs-max:10 dir:C:\Us
+ers\abrah\AppData\Loc
+al\npm-cache\_logs\20
+25-12-10T15_10_51_450
+Z-
+npm verbose logfile C
+:\Users\abrah\AppData
+\Local\npm-cache\_log
+s\2025-12-10T15_10_51
+_450Z-debug-0.log
+
+> moovia-monorepo@1.0.0 android
+> expo run:android
+
+ÔÇ║ Building app...
+Configuration on demand is an incubating feature.
+
+FAILURE: Build 
+failed with an 
+exception.
+
+* Where:
+Settings file 'C:\Use
+rs\abrah\OneDrive\Esc
+ritorio\La Salle\7mo\
+TFG_DOCUMENTACIËN\ARC
+HIVOS_VSCODE\APP\andr
+oid\settings.gradle' 
+line: 21
+
+* What went wrong:
+Error resolving 
+plugin [id: 'com.face
+book.react.settings']
+> Included build 'C:\
+Users\abrah\OneDrive\
+Escritorio\La Salle\7
+mo\TFG_DOCUMENTACI├ôN
+\ARCHIVOS_VSCODE\APP\
+node_modules\@react-n
+ative\gradle-plugin' 
+does not exist.
+
+* Try:
+> Run with 
+--stacktrace option 
+to get the stack 
+trace.
+> Run with --info or 
+--debug option to 
+get more log output.
+> Run with --scan to 
+get full insights.
+> Get more help at ht
+tps://help.gradle.org
+.
+
+BUILD FAILED in 1s
+Error: C:\Users\abrah
+\OneDrive\Escritorio\
+La Salle\7mo\TFG_DOCU
+MENTACI├ôN\ARCHIVOS_V
+SCODE\APP\android\gra
+dlew.bat 
+app:assembleDebug -x 
+lint -x test --config
+ure-on-demand 
+--build-cache -Preact
+NativeDevServerPort=8
+081 -PreactNativeArch
+itectures=arm64-v8a 
+exited with non-zero 
+code: 1
+Error: C:\Users\abrah
+\OneDrive\Escritorio\
+La Salle\7mo\TFG_DOCU
+MENTACI├ôN\ARCHIVOS_V
+SCODE\APP\android\gra
+dlew.bat 
+app:assembleDebug -x 
+lint -x test --config
+ure-on-demand 
+--build-cache -Preact
+NativeDevServerPort=8
+081 -PreactNativeArch
+itectures=arm64-v8a 
+exited with non-zero 
+code: 1
+    at ChildProcess.c
+ompletionListener (C:
+\Users\abrah\OneDrive
+\Escritorio\La Salle\
+7mo\TFG_DOCUMENTACI├ô
+N\ARCHIVOS_VSCODE\APP
+\node_modules\@expo\s
+pawn-async\src\spawnA
+sync.ts:67:13)
+    at 
+Object.onceWrapper 
+(node:events:639:26)
+    at 
+ChildProcess.emit 
+(node:events:524:28)
+    at 
+ChildProcess.cp.emit 
+(C:\Users\abrah\OneDr
+ive\Escritorio\La Sal
+le\7mo\TFG_DOCUMENTAC
+I├ôN\ARCHIVOS_VSCODE\
+APP\node_modules\cros
+s-spawn\lib\enoent.js
+:34:29)
+    at maybeClose (no
+de:internal/child_pro
+cess:1101:16)
+    at Process.ChildP
+rocess._handle.onexit
+ (node:internal/child
+_process:304:5)
+    ...
+    at spawnAsync (C:
+\Users\abrah\OneDrive
+\Escritorio\La Salle\
+7mo\TFG_DOCUMENTACI├ô
+N\ARCHIVOS_VSCODE\APP
+\node_modules\@expo\s
+pawn-async\src\spawnA
+sync.ts:28:21)
+    at 
+spawnGradleAsync (C:\
+Users\abrah\OneDrive\
+Escritorio\La Salle\7
+mo\TFG_DOCUMENTACI├ôN
+\ARCHIVOS_VSCODE\APP\
+node_modules\@expo\cl
+i\src\start\platforms
+\android\gradle.ts:13
+4:28)
+    at assembleAsync 
+(C:\Users\abrah\OneDr
+ive\Escritorio\La Sal
+le\7mo\TFG_DOCUMENTAC
+I├ôN\ARCHIVOS_VSCODE\
+APP\node_modules\@exp
+o\cli\src\start\platf
+orms\android\gradle.t
+s:83:16)
+    at 
+runAndroidAsync (C:\U
+sers\abrah\OneDrive\E
+scritorio\La Salle\7m
+o\TFG_DOCUMENTACI├ôN\
+ARCHIVOS_VSCODE\APP\n
+ode_modules\@expo\cli
+\src\run\android\runA
+ndroidAsync.ts:62:24)
+npm verbose cwd C:\Us
+ers\abrah\OneDrive\Es
+critorio\La Salle\7mo
+\TFG_DOCUMENTACI├ôN\A
+RCHIVOS_VSCODE\APP
+npm verbose os 
+Windows_NT 10.0.26100
+npm verbose node 
+v22.12.0
+npm verbose npm  
+v11.5.2
+npm verbose exit 1
+npm verbose code 1
