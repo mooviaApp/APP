@@ -10,12 +10,15 @@
   },
   "dependencies": {
     "@moovia/domain": "^1.0.0",
+    "base-64": "^1.0.0",
     "expo": "~54.0.25",
     "expo-status-bar": "~3.0.8",
     "react": "18.3.1",
-    "react-native": "0.81.5"
+    "react-native": "0.81.5",
+    "react-native-ble-plx": "^3.2.1"
   },
   "devDependencies": {
+    "@types/base-64": "^1.0.2",
     "@types/react": "~19.1.0",
     "typescript": "~5.9.2"
   },

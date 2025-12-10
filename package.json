@@ -13,7 +13,9 @@
     "dev:mobile": "npm run start --workspace=apps/mobile",
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:web\" \"npm run dev:mobile\"",
     "build": "npm run build --workspaces",
-    "test": "npm run test --workspaces"
+    "test": "npm run test --workspaces",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "repository": {
     "type": "git",
@@ -23,10 +25,16 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "baseline-browser-mapping": "^2.9.2",
     "concurrently": "^9.1.0"
   },
   "bugs": {
     "url": "https://github.com/mooviaApp/APP/issues"
   },
-  "homepage": "https://github.com/mooviaApp/APP#readme"
+  "homepage": "https://github.com/mooviaApp/APP#readme",
+  "dependencies": {
+    "expo": "~54.0.25",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
+  }
 }
