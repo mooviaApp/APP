@@ -216,6 +216,20 @@ export class BLEService {
             console.log('Discovering services...');
             await device.discoverAllServicesAndCharacteristics();
 
+
+            // Request MTU for 241-byte packets
+            try {
+                const updatedDevice = await device.requestMTU(BLE_CONFIG.REQUIRED_MTU);
+                const mtu = updatedDevice.mtu || BLE_CONFIG.REQUIRED_MTU;
+                console.log(`MTU negotiated: ${mtu} bytes`);
+                if (mtu < BLE_CONFIG.REQUIRED_MTU) {
+                    console.warn(`MTU ${mtu} is less than required ${BLE_CONFIG.REQUIRED_MTU}. Large packets may fail.`);
+                }
+            } catch (error: any) {
+                console.warn('MTU negotiation failed:', error.message);
+            }
+
+
             // Enable notifications
             await this.enableNotifications();
 
@@ -327,26 +341,29 @@ export class BLEService {
 
     /**
      * Handle data characteristic notification (IMU samples)
+     * Now receives 20 samples per packet
      */
     private handleDataNotification(base64Data: string): void {
         try {
             const decoded = decodeNotification(base64Data);
 
-            if (decoded && 'ax' in decoded) {
-                // It's an IMU sample
-                const sample = decoded as IMUSample;
+            if (decoded && Array.isArray(decoded)) {
+                // It's an array of IMU samples (20 samples per packet)
+                const samples = decoded as IMUSample[];
 
-                // Add to buffer
-                this.sampleBuffer.push(sample);
+                // Add all samples to buffer
+                this.sampleBuffer.push(...samples);
 
-                // Emit individual sample
-                this.emit({
-                    type: 'dataReceived',
-                    data: { sample },
-                });
+                // Emit the last sample for real-time display
+                if (samples.length > 0) {
+                    this.emit({
+                        type: 'dataReceived',
+                        data: { sample: samples[samples.length - 1] },
+                    });
+                }
 
                 // Check if buffer is full (ready to send to backend)
-                if (this.sampleBuffer.length >= SENSOR_CONFIG.BATCH_SIZE) {
+                if (this.sampleBuffer.length >= SENSOR_CONFIG.BATCH_SIZE_SAMPLES) {
                     // Note: Backend transmission will be handled by the hook/component
                     // We just keep the buffer here
                 }

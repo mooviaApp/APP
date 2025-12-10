@@ -3,6 +3,8 @@
  * 
  * Functions for decoding BLE notification data from the MOOVIA sensor.
  * Handles int16 little-endian conversion and physical unit conversion.
+ * 
+ * Updated for firmware v2: 20 samples per packet at 1 kHz ODR
  */
 
 import { decode as base64Decode } from 'base-64';
@@ -76,47 +78,61 @@ export function rawToAccel(raw: number): number {
 // ============================================================================
 
 /**
- * Decode IMU sample data packet
+ * Decode IMU sample data packet with 20 aggregated samples
  * 
- * Packet structure (13 bytes):
+ * Packet structure (241 bytes):
  * - Byte 0: Message type (0x02)
- * - Bytes 1-2: ax (int16 LE)
- * - Bytes 3-4: ay (int16 LE)
- * - Bytes 5-6: az (int16 LE)
- * - Bytes 7-8: gx (int16 LE)
- * - Bytes 9-10: gy (int16 LE)
- * - Bytes 11-12: gz (int16 LE)
+ * - Bytes 1-12: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE)
+ * - Bytes 13-24: Sample 2
+ * - ... (continues for 20 samples total)
+ * - Bytes 229-240: Sample 20
  * 
  * @param bytes - Raw byte array from BLE notification
- * @returns Decoded IMU sample with physical units
+ * @returns Array of 20 decoded IMU samples with physical units
  */
-export function decodeIMUSample(bytes: Uint8Array): IMUSample {
-    if (bytes.length < 13) {
-        throw new Error(`Invalid IMU sample length: ${bytes.length} (expected 13)`);
+export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
+    const expectedSize = SENSOR_CONFIG.PACKET_SIZE_BYTES;
+
+    if (bytes.length < expectedSize) {
+        throw new Error(`Invalid IMU packet length: ${bytes.length} (expected ${expectedSize})`);
     }
 
     if (bytes[0] !== MESSAGE_TYPES.SAMPLE) {
         throw new Error(`Invalid message type: 0x${bytes[0].toString(16)} (expected 0x02)`);
     }
 
-    // Read raw int16 values
-    const rawAx = readInt16LE(bytes, 1);
-    const rawAy = readInt16LE(bytes, 3);
-    const rawAz = readInt16LE(bytes, 5);
-    const rawGx = readInt16LE(bytes, 7);
-    const rawGy = readInt16LE(bytes, 9);
-    const rawGz = readInt16LE(bytes, 11);
+    const samples: IMUSample[] = [];
+    const baseTimestamp = Date.now();
 
-    // Convert to physical units
-    return {
-        timestamp: new Date().toISOString(),
-        ax: rawToAccel(rawAx),
-        ay: rawToAccel(rawAy),
-        az: rawToAccel(rawAz),
-        gx: rawToGyro(rawGx),
-        gy: rawToGyro(rawGy),
-        gz: rawToGyro(rawGz),
-    };
+    // Parse 20 samples starting from byte 1
+    for (let i = 0; i < SENSOR_CONFIG.SAMPLES_PER_PACKET; i++) {
+        const offset = 1 + (i * SENSOR_CONFIG.BYTES_PER_SAMPLE);
+
+        // Read raw int16 values for this sample
+        const rawAx = readInt16LE(bytes, offset + 0);
+        const rawAy = readInt16LE(bytes, offset + 2);
+        const rawAz = readInt16LE(bytes, offset + 4);
+        const rawGx = readInt16LE(bytes, offset + 6);
+        const rawGy = readInt16LE(bytes, offset + 8);
+        const rawGz = readInt16LE(bytes, offset + 10);
+
+        // Calculate timestamp for this sample
+        // Each sample is 1ms apart (1 kHz ODR)
+        const sampleTimestamp = new Date(baseTimestamp + i).toISOString();
+
+        // Convert to physical units and add to array
+        samples.push({
+            timestamp: sampleTimestamp,
+            ax: rawToAccel(rawAx),
+            ay: rawToAccel(rawAy),
+            az: rawToAccel(rawAz),
+            gx: rawToGyro(rawGx),
+            gy: rawToGyro(rawGy),
+            gz: rawToGyro(rawGz),
+        });
+    }
+
+    return samples;
 }
 
 /**
@@ -181,9 +197,9 @@ export function decodeWHOAMI(bytes: Uint8Array): WHOAMIResponse {
  * Decode any BLE notification based on message type
  * 
  * @param base64Data - Base64-encoded data from BLE notification
- * @returns Decoded message object
+ * @returns Decoded message object (array of samples for SAMPLE type, single object for others)
  */
-export function decodeNotification(base64Data: string): IMUSample | LogMessage | WHOAMIResponse | null {
+export function decodeNotification(base64Data: string): IMUSample[] | LogMessage | WHOAMIResponse | null {
     try {
         const bytes = decodeBase64ToBytes(base64Data);
 
@@ -196,7 +212,7 @@ export function decodeNotification(base64Data: string): IMUSample | LogMessage |
 
         switch (messageType) {
             case MESSAGE_TYPES.SAMPLE:
-                return decodeIMUSample(bytes);
+                return decodeIMUPacket(bytes);
 
             case MESSAGE_TYPES.LOG:
                 return decodeLogMessage(bytes);

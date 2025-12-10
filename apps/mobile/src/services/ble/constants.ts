@@ -45,7 +45,7 @@ export const BLE_COMMANDS = {
 // ============================================================================
 
 export const MESSAGE_TYPES = {
-    /** IMU sample data packet (13 bytes: type + 6x int16) */
+    /** IMU sample data packet (241 bytes: type + 20 samples × 12 bytes) */
     SAMPLE: 0x02,
 
     /** Log message (ASCII text) */
@@ -72,14 +72,29 @@ export const SENSOR_CONFIG = {
     /** Accelerometer range in g */
     ACCEL_RANGE_G: 16,
 
-    /** Output Data Rate in Hz */
+    /** Output Data Rate in Hz (1 kHz = 1 sample per ms) */
     ODR_HZ: 1000,
 
-    /** Expected sample interval in ms (~20ms based on firmware) */
-    SAMPLE_INTERVAL_MS: 20,
+    /** Number of samples per BLE packet from firmware */
+    SAMPLES_PER_PACKET: 20,
 
-    /** Batch size for sending to backend (samples per batch) */
-    BATCH_SIZE: 50, // ~1 second of data
+    /** Bytes per sample (6 int16 values = 12 bytes) */
+    BYTES_PER_SAMPLE: 12,
+
+    /** Total packet size (1 byte type + 20 samples × 12 bytes) */
+    PACKET_SIZE_BYTES: 241,
+
+    /** Expected sample interval in ms (1 ms per sample) */
+    SAMPLE_INTERVAL_MS: 1,
+
+    /** Packet interval in ms (20 samples at 1 kHz = 20 ms) */
+    PACKET_INTERVAL_MS: 20,
+
+    /** Batch size for sending to backend (number of packets to accumulate) */
+    BATCH_SIZE_PACKETS: 3, // 3 packets × 20 samples = 60 samples ≈ 60 ms
+
+    /** Total samples in a batch for backend */
+    BATCH_SIZE_SAMPLES: 60, // 3 packets × 20 samples
 } as const;
 
 // ============================================================================
@@ -87,6 +102,9 @@ export const SENSOR_CONFIG = {
 // ============================================================================
 
 export const BLE_CONFIG = {
+    /** Required MTU size for 241-byte packets (241 + 3 bytes overhead + margin) */
+    REQUIRED_MTU: 247,
+
     /** Scan timeout in milliseconds */
     SCAN_TIMEOUT_MS: 10000,
 
