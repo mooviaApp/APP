@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev:mobile": "npm run start --workspace=apps/mobile",
-    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:web\" \"npm run dev:mobile\"",
+    "dev": "npm run dev:mobile",
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
     "android": "expo run:android",
