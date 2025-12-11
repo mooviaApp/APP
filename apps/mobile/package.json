@@ -8,9 +8,11 @@
     "ios": "expo run:ios"
   },
   "dependencies": {
+    "at-least-node": "^1.0.0",
     "base-64": "^1.0.0",
     "expo": "52.0.47",
     "expo-status-bar": "~2.0.1",
+    "expo-system-ui": "~4.0.7",
     "react": "18.3.1",
     "react-native": "0.76.9",
     "react-native-ble-plx": "^3.5.0"

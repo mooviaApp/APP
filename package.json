@@ -23,21 +23,11 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@react-native/metro-config": "^0.83.0",
     "baseline-browser-mapping": "^2.9.2",
-    "concurrently": "^9.1.0",
-    "metro": "^0.83.1",
-    "metro-cache": "^0.81.0",
-    "metro-config": "^0.81.0",
-    "metro-resolver": "^0.81.0"
+    "concurrently": "^9.1.0"
   },
   "bugs": {
     "url": "https://github.com/mooviaApp/APP/issues"
   },
-  "homepage": "https://github.com/mooviaApp/APP#readme",
-  "dependencies": {
-    "expo": "~54.0.25",
-    "react": "19.1.0",
-    "react-native": "0.81.5"
-  }
+  "homepage": "https://github.com/mooviaApp/APP#readme"
 }
