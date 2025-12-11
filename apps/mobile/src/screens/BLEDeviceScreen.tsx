@@ -17,6 +17,7 @@ import {
     Alert,
 } from 'react-native';
 import { Device } from 'react-native-ble-plx';
+// type Device = any; // Mock type for Device since library is removed
 import { useBLE } from '../hooks/useBLE';
 import { SensorDataCard } from '../components/SensorDataCard';
 

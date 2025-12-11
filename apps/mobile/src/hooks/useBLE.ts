@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { PermissionsAndroid, Platform, Alert } from 'react-native';
 import { Device } from 'react-native-ble-plx';
+// type Device = any; // Mock type for Device since library is removed
 import { getBLEService, BLEEvent } from '../services/ble/BLEService';
 import { IMUSample, LogMessage, WHOAMIResponse, SENSOR_CONFIG } from '../services/ble/constants';
 

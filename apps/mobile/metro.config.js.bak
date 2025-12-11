@@ -1,0 +1,19 @@
+const { getDefaultConfig } = require('expo/metro-config');
+const path = require('path');
+
+const projectRoot = __dirname;
+const workspaceRoot = path.resolve(projectRoot, '../..');
+
+const config = getDefaultConfig(projectRoot);
+
+// Monorepo configuration
+config.watchFolders = [workspaceRoot];
+config.resolver.nodeModulesPaths = [
+    path.resolve(projectRoot, 'node_modules'),
+    path.resolve(workspaceRoot, 'node_modules'),
+];
+
+// Disable metro-cache to avoid compatibility issues
+config.cacheStores = [];
+
+module.exports = config;

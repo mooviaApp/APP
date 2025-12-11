@@ -1,5 +1,5 @@
 import React from "react";
-import { SafeAreaView, StatusBar, StyleSheet } from "react-native";
+import { SafeAreaView, StatusBar, StyleSheet, Text } from "react-native";
 import { BLEDeviceScreen } from "./src/screens/BLEDeviceScreen";
 
 export default function App() {
