@@ -12,8 +12,8 @@
     "dev": "npm run dev:mobile",
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
-    "android": "expo run:android",
-    "ios": "expo run:ios"
+    "android": "npm run android --workspace=apps/mobile",
+    "ios": "npm run ios --workspace=apps/mobile"
   },
   "repository": {
     "type": "git",
