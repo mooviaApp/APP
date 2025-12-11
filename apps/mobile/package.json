@@ -4,7 +4,8 @@
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
-    "android": "expo run:android"
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "base-64": "^1.0.0",
