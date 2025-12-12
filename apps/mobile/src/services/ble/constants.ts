@@ -9,17 +9,17 @@
 // Service and Characteristic UUIDs
 // ============================================================================
 
-export const BLE_SERVICE_UUID = '12345678-1234-5678-1234-567812345678';
+export const BLE_SERVICE_UUID = '78563412-7856-3412-7856-341278563412';
 
 export const BLE_CHARACTERISTICS = {
     /** Characteristic 0: IMU Data (Read, Notify) */
-    DATA: '12345678-1234-5678-1234-567800000001',
+    DATA: '01000000-7856-3412-7856-341278563412',
 
     /** Characteristic 1: Commands (Write Without Response) */
-    COMMAND: '12345678-1234-5678-1234-567800000002',
+    COMMAND: '02000000-7856-3412-7856-341278563412',
 
     /** Characteristic 2: Logs and Responses (Read, Notify) */
-    LOG: '12345678-1234-5678-1234-567800000003',
+    LOG: '03000000-7856-3412-7856-341278563412',
 } as const;
 
 // ============================================================================
