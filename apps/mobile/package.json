@@ -18,11 +18,9 @@
     "react-native-ble-plx": "^3.5.0"
   },
   "devDependencies": {
-    "@expo/cli": "^54.0.19",
-    "@react-native-community/cli": "latest",
     "@types/base-64": "^1.0.2",
     "@types/react": "~18.3.12",
-    "typescript": "~5.9.2"
+    "typescript": "~5.3.3"
   },
   "private": true
 }
