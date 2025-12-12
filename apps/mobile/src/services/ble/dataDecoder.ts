@@ -91,24 +91,41 @@ export function rawToAccel(raw: number): number {
  * @returns Array of 20 decoded IMU samples with physical units
  */
 export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
+    // Expected size: 241 bytes
+    // Byte 0: 0x02
+    // Bytes 1..240: 20 samples * 12 bytes
     const expectedSize = SENSOR_CONFIG.PACKET_SIZE_BYTES;
 
     if (bytes.length < expectedSize) {
-        throw new Error(`Invalid IMU packet length: ${bytes.length} (expected ${expectedSize})`);
+        // Log error but don't throw if just slightly off/fragmented, though for now we enforce strict size
+        // Mark as warning to avoid crashing app loop
+        console.warn(`Invalid IMU packet length: ${bytes.length} (expected ${expectedSize})`);
+        // If we want to return partial, we could, but let's strictly return empty array if bad
+        return [];
     }
 
     if (bytes[0] !== MESSAGE_TYPES.SAMPLE) {
-        throw new Error(`Invalid message type: 0x${bytes[0].toString(16)} (expected 0x02)`);
+        console.warn(`Invalid message type: 0x${bytes[0].toString(16)} (expected 0x02)`);
+        return [];
     }
 
     const samples: IMUSample[] = [];
-    const baseTimestamp = Date.now();
+    // Use current time as base, but subtract latency if needed. 
+    // Here we assume packet just arrived.
+    // The samples are 1ms apart, last one is "now".
+    // So sample 0 is (now - 19ms), sample 19 is (now).
+    const now = Date.now();
+    const baseTimestamp = now - ((SENSOR_CONFIG.SAMPLES_PER_PACKET - 1) * SENSOR_CONFIG.SAMPLE_INTERVAL_MS);
 
     // Parse 20 samples starting from byte 1
     for (let i = 0; i < SENSOR_CONFIG.SAMPLES_PER_PACKET; i++) {
         const offset = 1 + (i * SENSOR_CONFIG.BYTES_PER_SAMPLE);
 
+        // Safety check for bounds
+        if (offset + 12 > bytes.length) break;
+
         // Read raw int16 values for this sample
+        // Little Endian
         const rawAx = readInt16LE(bytes, offset + 0);
         const rawAy = readInt16LE(bytes, offset + 2);
         const rawAz = readInt16LE(bytes, offset + 4);
@@ -117,8 +134,7 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
         const rawGz = readInt16LE(bytes, offset + 10);
 
         // Calculate timestamp for this sample
-        // Each sample is 1ms apart (1 kHz ODR)
-        const sampleTimestamp = new Date(baseTimestamp + i).toISOString();
+        const sampleTimestamp = new Date(baseTimestamp + (i * SENSOR_CONFIG.SAMPLE_INTERVAL_MS)).toISOString();
 
         // Convert to physical units and add to array
         samples.push({

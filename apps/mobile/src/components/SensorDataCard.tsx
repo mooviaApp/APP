@@ -7,6 +7,7 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { IMUSample } from '../services/ble/constants';
+import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
 
 interface SensorDataCardProps {
     data: IMUSample | null;
@@ -22,9 +23,59 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
         );
     }
 
+    // Get current trajectory state direct from service (since it's singleton and sync)
+    // In a real app we might want a hook/subscription, but for MVP this works since we re-render on 'data' change
+    const path = trajectoryService.getPath();
+    const lastPoint = path[path.length - 1];
+    const position = lastPoint?.position || { x: 0, y: 0, z: 0 };
+
+    // Simple 2D Path Visualization (Top-Down X-Y)
+    // Scale: 1 meter = 50 pixels
+    const SCALE = 50;
+    const CENTER = 100; // Half of 200px box
+
     return (
         <View style={styles.container}>
             <Text style={styles.title}>Real-Time Sensor Data</Text>
+
+            {/* Trajectory Viz */}
+            <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Trajectory (Top Down X-Y)</Text>
+                <View style={{ width: 200, height: 200, backgroundColor: '#2E2E3E', borderRadius: 8, overflow: 'hidden', alignSelf: 'center', marginVertical: 10 }}>
+                    {/* Origin Crosshair */}
+                    <View style={{ position: 'absolute', left: CENTER, top: 0, bottom: 0, width: 1, backgroundColor: '#444' }} />
+                    <View style={{ position: 'absolute', top: CENTER, left: 0, right: 0, height: 1, backgroundColor: '#444' }} />
+
+                    {/* Path */}
+                    {path.slice(-100).map((p, i) => (
+                        <View
+                            key={i}
+                            style={{
+                                position: 'absolute',
+                                left: CENTER + (p.position.x * SCALE),
+                                top: CENTER - (p.position.y * SCALE), // Invert Y for screen coords
+                                width: 2,
+                                height: 2,
+                                backgroundColor: i === path.length - 1 || i === 99 ? '#FFF' : '#4ECDC4',
+                                borderRadius: 1,
+                            }}
+                        />
+                    ))}
+                    {/* Head */}
+                    <View
+                        style={{
+                            position: 'absolute',
+                            left: CENTER + (position.x * SCALE) - 3,
+                            top: CENTER - (position.y * SCALE) - 3,
+                            width: 6,
+                            height: 6,
+                            backgroundColor: '#FF6B6B',
+                            borderRadius: 3,
+                        }}
+                    />
+                </View>
+                <Text style={styles.timestamp}>Pos: [{position.x.toFixed(2)}, {position.y.toFixed(2)}, {position.z.toFixed(2)}] m</Text>
+            </View>
 
             {/* Accelerometer */}
             <View style={styles.section}>

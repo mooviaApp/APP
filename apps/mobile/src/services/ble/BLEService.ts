@@ -22,6 +22,7 @@ import {
     encodeCommand,
     decodeBase64ToBytes,
 } from './dataDecoder';
+import { trajectoryService } from '../math/TrajectoryService';
 
 // ============================================================================
 // Event Types
@@ -141,9 +142,11 @@ export class BLEService {
             // Stop any previous scan
             await this.manager.stopDeviceScan();
 
-            // Start new scan
+            console.log('Starting scan for Service UUID:', BLE_SERVICE_UUID);
+
+            // Start new scan with Service UUID filter
             this.manager.startDeviceScan(
-                null, // Scan for all devices
+                [BLE_SERVICE_UUID], // Scan for devices advertising our service
                 { allowDuplicates: false },
                 (error, device) => {
                     if (error) {
@@ -153,7 +156,9 @@ export class BLEService {
                         return;
                     }
 
-                    if (device && device.name === SENSOR_CONFIG.DEVICE_NAME) {
+                    // Check device name if available, otherwise just accept since UUID matched
+                    if (device) {
+                        console.log(`Discovered device: ${device.name} (${device.id})`);
                         this.emit({
                             type: 'deviceFound',
                             data: { device },
@@ -199,7 +204,7 @@ export class BLEService {
 
             console.log(`Connecting to device: ${deviceId}`);
 
-            // Connect with timeout
+            // 1. Connect
             const device = await this.manager.connectToDevice(deviceId, {
                 timeout: BLE_CONFIG.CONNECTION_TIMEOUT_MS,
             });
@@ -212,31 +217,33 @@ export class BLEService {
                 this.handleDisconnection(error);
             });
 
-            // Discover services and characteristics
+            // 2. Discover services and characteristics
             console.log('Discovering services...');
             await device.discoverAllServicesAndCharacteristics();
+            console.log('Services discovered');
 
+            // 3. Enable notifications (Samples & Logs) BEFORE MTU/Start
+            await this.enableNotifications();
 
-            // Request MTU for 241-byte packets
+            // 4. Request MTU
+            console.log(`Requesting MTU: ${BLE_CONFIG.REQUIRED_MTU}`);
             try {
+                // Wait small delay to ensure notifying is settled? Usually not needed if awaited.
                 const updatedDevice = await device.requestMTU(BLE_CONFIG.REQUIRED_MTU);
                 const mtu = updatedDevice.mtu || BLE_CONFIG.REQUIRED_MTU;
                 console.log(`MTU negotiated: ${mtu} bytes`);
+
                 if (mtu < BLE_CONFIG.REQUIRED_MTU) {
-                    console.warn(`MTU ${mtu} is less than required ${BLE_CONFIG.REQUIRED_MTU}. Large packets may fail.`);
+                    console.warn(`WARNING: Negotiated MTU ${mtu} < Required ${BLE_CONFIG.REQUIRED_MTU}. Packets may be truncated!`);
                 }
             } catch (error: any) {
-                console.warn('MTU negotiation failed:', error.message);
+                console.warn('MTU negotiation failed, proceeding anyway:', error.message);
             }
-
-
-            // Enable notifications
-            await this.enableNotifications();
 
             this.reconnectAttempts = 0;
             this.emit({ type: 'connected', data: { device } });
 
-            console.log('Successfully connected and configured');
+            console.log('Successfully connected and configured. Ready to stream.');
 
         } catch (error: any) {
             console.error('Connection failed:', error);
@@ -345,6 +352,20 @@ export class BLEService {
      */
     private handleDataNotification(base64Data: string): void {
         try {
+            const rawBytes = decodeBase64ToBytes(base64Data);
+
+            // DEBUG LOGGING
+            if (rawBytes.length != SENSOR_CONFIG.PACKET_SIZE_BYTES || Math.random() < 0.05) {
+                // Log if invalid length or randomly for health check
+                const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                const msg = `Rx Data: Len=${rawBytes.length}, Header=${rawBytes[0]?.toString(16) || '??'}, Bytes: [${hexPreview}...]`;
+                if (rawBytes.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
+                    console.warn('INVALID PKT LEN: ' + msg);
+                } else {
+                    console.log(msg);
+                }
+            }
+
             const decoded = decodeNotification(base64Data);
 
             if (decoded && Array.isArray(decoded)) {
@@ -354,7 +375,12 @@ export class BLEService {
                 // Add all samples to buffer
                 this.sampleBuffer.push(...samples);
 
-                // Emit the last sample for real-time display
+                // Process samples for trajectory (All samples needed for integration)
+                samples.forEach(sample => {
+                    trajectoryService.processSample(sample);
+                });
+
+                // Emit only the last sample for real-time display
                 if (samples.length > 0) {
                     this.emit({
                         type: 'dataReceived',
@@ -421,7 +447,7 @@ export class BLEService {
                 encodedCommand
             );
 
-            console.log(`Sent command: 0x${command.toString(16)}`);
+            console.log(`Sent command: 0x${command.toString(16)} to ${BLE_CHARACTERISTICS.COMMAND}`);
 
         } catch (error: any) {
             console.error('Failed to send command:', error);
