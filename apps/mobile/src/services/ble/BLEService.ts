@@ -142,11 +142,9 @@ export class BLEService {
             // Stop any previous scan
             await this.manager.stopDeviceScan();
 
-            console.log('Starting scan for Service UUID:', BLE_SERVICE_UUID);
-
-            // Start new scan with Service UUID filter
+            // Start new scan (Relaxed filter to ensure we find it, regardless of advertised UUID format)
             this.manager.startDeviceScan(
-                [BLE_SERVICE_UUID], // Scan for devices advertising our service
+                null,
                 { allowDuplicates: false },
                 (error, device) => {
                     if (error) {
@@ -156,13 +154,19 @@ export class BLEService {
                         return;
                     }
 
-                    // Check device name if available, otherwise just accept since UUID matched
                     if (device) {
-                        console.log(`Discovered device: ${device.name} (${device.id})`);
-                        this.emit({
-                            type: 'deviceFound',
-                            data: { device },
-                        });
+                        // Debug log for every device found (temporary)
+                        // console.log(`Scanned: ${device.name} (${device.id}) - UUIDs: ${device.serviceUUIDs}`);
+
+                        if (device.name === SENSOR_CONFIG.DEVICE_NAME) {
+                            console.log(`FOUND MOOVIA! ID: ${device.id}`);
+                            console.log(`Advertised Service UUIDs: ${JSON.stringify(device.serviceUUIDs)}`);
+
+                            this.emit({
+                                type: 'deviceFound',
+                                data: { device },
+                            });
+                        }
                     }
                 }
             );
@@ -220,7 +224,8 @@ export class BLEService {
             // 2. Discover services and characteristics
             console.log('Discovering services...');
             await device.discoverAllServicesAndCharacteristics();
-            console.log('Services discovered');
+            const services = await device.services();
+            console.log('Services discovered:', services.map(s => s.uuid));
 
             // 3. Enable notifications (Samples & Logs) BEFORE MTU/Start
             await this.enableNotifications();
