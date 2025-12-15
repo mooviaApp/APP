@@ -41,10 +41,10 @@ export class TrajectoryService {
     // Constants
     private readonly SAMPLING_RATE = 1000; // 1 kHz
     private readonly DT = 1.0 / this.SAMPLING_RATE;
-    private readonly ALPHA = 0.98; // Complementary filter weight (High trust in Gyro)
+    private readonly ALPHA = 0.95; // Complementary filter weight (High trust in Gyro)
     private readonly GRAVITY = 9.81;
-    private readonly REST_THRESHOLD = 0.15; // rad/s threshold for gyroscope to detect rest
-    private readonly ACCEL_REST_WINDOW = 0.1; // g deviation from 1g allowed for rest
+    private readonly REST_THRESHOLD = 0.08; // rad/s threshold for gyroscope to detect rest
+    private readonly ACCEL_REST_WINDOW = 0.05; // g deviation from 1g allowed for rest
 
     // Buffer for simple moving average or calibration if needed
     private path: TrajectoryPoint[] = [];
@@ -111,10 +111,43 @@ export class TrajectoryService {
         this.q.y /= norm;
         this.q.z /= norm;
 
-        // TODO: Add Accelerometer correction (Tilt correction) here for full Complementary/Madgwick
-        // For now, purely gyro + ZUPT is often better for short movements than a noisy tilt correction
-        // User asked for "correction with accelerometer", we can do a simple tilt correction if stationary.
-        // Assuming minimal viable product, we'll rely on ZUPT for Drift control.
+        // 2.1 Corrección de Inclinación (Tilt Correction)
+        // Solo corregimos si la fuerza total es cercana a 1g (estamos idealmente quietos o movimiento uniforme)
+        // Esto evita que corrijamos con fuerzas de aceleración bruscas (correr, saltar)
+        const accelMagSq = (ax / this.GRAVITY) ** 2 + (ay / this.GRAVITY) ** 2 + (az / this.GRAVITY) ** 2;
+
+        if (Math.abs(accelMagSq - 1.0) < 0.2) { // Margen de ~10% de tolerancia
+            // Normalizar aceleración medida
+            const normAcc = 1.0 / Math.sqrt(accelMagSq);
+            const ax_n = (ax / this.GRAVITY) * normAcc;
+            const ay_n = (ay / this.GRAVITY) * normAcc;
+            const az_n = (az / this.GRAVITY) * normAcc;
+
+            // Dirección estimada de la gravedad (Vector "Abajo" relativo al cuerpo)
+            // Matemáticamente: es la tercera columna de la matriz de rotación
+            const vx = 2 * (this.q.x * this.q.z - this.q.w * this.q.y);
+            const vy = 2 * (this.q.w * this.q.x + this.q.y * this.q.z);
+            const vz = this.q.w * this.q.w - this.q.x * this.q.x - this.q.y * this.q.y + this.q.z * this.q.z;
+
+            // Producto Cruz: Calculamos el error (ángulo) entre lo que "creemos" que es abajo (vx,vy,vz)
+            // y lo que el acelerómetro "siente" que es abajo (ax_n, ay_n, az_n).
+            const ex = ay_n * vz - az_n * vy;
+            const ey = az_n * vx - ax_n * vz;
+            const ez = ax_n * vy - ay_n * vx;
+
+            // Aplicar corrección al Cuaternión
+            // Usamos un factor pequeño (BETA) porque confiamos más en el Giroscopio a corto plazo
+            const BETA = 0.1 * dt; // Factor de corrección suave
+
+            this.q.w += BETA * (-this.q.x * ex - this.q.y * ey - this.q.z * ez);
+            this.q.x += BETA * (this.q.w * ex + this.q.y * ez - this.q.z * ey);
+            this.q.y += BETA * (this.q.w * ey - this.q.x * ez + this.q.z * ex);
+            this.q.z += BETA * (this.q.w * ez + this.q.x * ey - this.q.y * ex);
+
+            // Renormalizar para asegurar que sigue siendo una rotación válida
+            const n = Math.sqrt(this.q.w ** 2 + this.q.x ** 2 + this.q.y ** 2 + this.q.z ** 2);
+            this.q.w /= n; this.q.x /= n; this.q.y /= n; this.q.z /= n;
+        }
 
         // 3. Rotate Accel to World Frame
         // a_world = q * a_body * q_conj
