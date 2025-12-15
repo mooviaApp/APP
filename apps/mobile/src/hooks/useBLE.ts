@@ -10,6 +10,7 @@ import { Device } from 'react-native-ble-plx';
 // type Device = any; // Mock type for Device since library is removed
 import { getBLEService, BLEEvent } from '../services/ble/BLEService';
 import { IMUSample, LogMessage, WHOAMIResponse, SENSOR_CONFIG } from '../services/ble/constants';
+import { trajectoryService } from '../services/math/TrajectoryService';
 
 // ============================================================================
 // Types
@@ -285,7 +286,9 @@ export function useBLE(): UseBLEResult {
         try {
             setError(null);
             await bleService.resetIMU();
-            Alert.alert('IMU Reset', 'Sensor has been reset and reconfigured.');
+            // Also reset software trajectory state
+            trajectoryService.reset();
+            Alert.alert('IMU Reset', 'Sensor hardware and software trajectory have been reset.');
         } catch (err: any) {
             setError(err.message);
         }

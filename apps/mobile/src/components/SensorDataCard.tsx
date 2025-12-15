@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Dimensions } from 'react-native';
 import { IMUSample } from '../services/ble/constants';
 import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
 
@@ -30,9 +30,14 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
     const position = lastPoint?.position || { x: 0, y: 0, z: 0 };
 
     // Simple 2D Path Visualization (Top-Down X-Y)
-    // Scale: 1 meter = 50 pixels
-    const SCALE = 50;
-    const CENTER = 100; // Half of 200px box
+    // Responsive Path Visualization
+    const screenWidth = Dimensions.get('window').width;
+    const GRAPH_SIZE = screenWidth - 60; // Padding
+    const CENTER = GRAPH_SIZE / 2;
+
+    // Scale: Map 3m range [-1.5, 1.5] to graph size
+    // 300px / 3m = 100 px/m
+    const SCALE = GRAPH_SIZE / 3.0;
 
     return (
         <View style={styles.container}>
@@ -40,8 +45,8 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
 
             {/* Trajectory Viz */}
             <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Trajectory (Top Down X-Y)</Text>
-                <View style={{ width: 200, height: 200, backgroundColor: '#2E2E3E', borderRadius: 8, overflow: 'hidden', alignSelf: 'center', marginVertical: 10 }}>
+                <Text style={styles.sectionTitle}>Trajectory (Top Down X-Y 3x3m)</Text>
+                <View style={{ width: GRAPH_SIZE, height: GRAPH_SIZE, backgroundColor: '#2E2E3E', borderRadius: 8, overflow: 'hidden', alignSelf: 'center', marginVertical: 10 }}>
                     {/* Origin Crosshair */}
                     <View style={{ position: 'absolute', left: CENTER, top: 0, bottom: 0, width: 1, backgroundColor: '#444' }} />
                     <View style={{ position: 'absolute', top: CENTER, left: 0, right: 0, height: 1, backgroundColor: '#444' }} />
