@@ -36,6 +36,7 @@ export interface UseBLEResult {
     startStreaming: () => Promise<void>;
     stopStreaming: () => Promise<void>;
     resetIMU: () => Promise<void>;
+    calibrateSensor: () => Promise<void>;
     clearError: () => void;
 }
 
@@ -294,6 +295,21 @@ export function useBLE(): UseBLEResult {
         }
     }, [bleService]);
 
+    const calibrateSensor = useCallback(async () => {
+        try {
+            setError(null);
+            // 1. Reset Hardware first
+            await bleService.resetIMU();
+            // 2. Wait a bit for hardware to settle
+            await new Promise(r => setTimeout(r, 500));
+            // 3. Start Software Calibration (2s)
+            await trajectoryService.calibrateAsync(2000);
+            Alert.alert('Calibration Complete', 'Sensor bias calculated and orientation reset.');
+        } catch (err: any) {
+            setError(err.message);
+        }
+    }, [bleService]);
+
     const clearError = useCallback(() => {
         setError(null);
     }, []);
@@ -322,6 +338,7 @@ export function useBLE(): UseBLEResult {
         startStreaming,
         stopStreaming,
         resetIMU,
+        calibrateSensor,
         clearError,
     };
 }

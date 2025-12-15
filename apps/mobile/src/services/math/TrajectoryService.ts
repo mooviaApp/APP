@@ -43,6 +43,11 @@ export class TrajectoryService {
     private segmentStartIndex: number = -1; // Index in this.path where movement started
     private segmentStartTime: number = 0;
 
+    // Calibration properties
+    private gyroBias = { x: 0, y: 0, z: 0 };
+    private isCalibrating: boolean = false;
+    private calibrationBuffer: IMUSample[] = [];
+
     // Constants
     private readonly SAMPLING_RATE = 1000; // 1 kHz
     private readonly DT = 1.0 / this.SAMPLING_RATE;
@@ -76,6 +81,12 @@ export class TrajectoryService {
         const t = new Date(sample.timestamp).getTime();
 
         // Handle first sample
+        // If calibrating, collect samples and return empty
+        if (this.isCalibrating) {
+            this.calibrationBuffer.push(sample);
+            return { timestamp: t, position: { x: 0, y: 0, z: 0 }, rotation: { w: 1, x: 0, y: 0, z: 0 } };
+        }
+
         if (this.lastTimestamp === 0) {
             this.lastTimestamp = t;
             return { timestamp: t, position: { ...this.position }, rotation: { ...this.q } };
@@ -87,10 +98,11 @@ export class TrajectoryService {
         this.lastTimestamp = t;
 
         // 1. Convert units
-        // Gyro: dps -> rad/s
-        const gx = sample.gx * (Math.PI / 180);
-        const gy = sample.gy * (Math.PI / 180);
-        const gz = sample.gz * (Math.PI / 180);
+        // 1. Convert units
+        // Gyro: dps -> rad/s (Apply Bias Correction)
+        const gx = (sample.gx - this.gyroBias.x) * (Math.PI / 180);
+        const gy = (sample.gy - this.gyroBias.y) * (Math.PI / 180);
+        const gz = (sample.gz - this.gyroBias.z) * (Math.PI / 180);
 
         // Accel: g -> m/s^2
         const ax = sample.ax * this.GRAVITY;
@@ -98,8 +110,8 @@ export class TrajectoryService {
         const az = sample.az * this.GRAVITY;
 
         // SANITY CHECK: Detect sensor saturation or invalid data
-        // If values are near +/- 16g (limit), ignoring them to prevent flying into space.
-        const SATURATION_LIMIT = 15.0 * this.GRAVITY; // 15g
+        // If values are near +/- 8g (limit), ignoring them to prevent flying into space.
+        const SATURATION_LIMIT = 7.5 * this.GRAVITY; // 7.5g (safe margin below 8g)
         if (Math.abs(ax) > SATURATION_LIMIT || Math.abs(ay) > SATURATION_LIMIT || Math.abs(az) > SATURATION_LIMIT) {
             console.warn('Sensor Saturation Detected! Ignoring sample.', { ax, ay, az });
             // Returns the last point (effectively pausing)
@@ -304,6 +316,53 @@ export class TrajectoryService {
      */
     getPath(): TrajectoryPoint[] {
         return this.path;
+    }
+
+    getOrientation() { return this.q; }
+    getVelocity() { return this.velocity; }
+
+    /**
+     * Calibrate the sensor (Calculate Gyro Bias)
+     * Keeps the sensor stationary for 'durationMs' and averages the gyro readings.
+     */
+    async calibrateAsync(durationMs: number = 2000): Promise<void> {
+        console.log('Starting Calibration...');
+        this.isCalibrating = true;
+        this.calibrationBuffer = [];
+
+        // Wait for samples to collect
+        await new Promise(resolve => setTimeout(resolve, durationMs));
+
+        this.isCalibrating = false;
+
+        if (this.calibrationBuffer.length > 0) {
+            // Calculate Average Gyro Bias
+            let sumX = 0, sumY = 0, sumZ = 0;
+            this.calibrationBuffer.forEach(s => sumX += s.gx);
+            this.calibrationBuffer.forEach(s => sumY += s.gy);
+            this.calibrationBuffer.forEach(s => sumZ += s.gz); // Correct summing
+
+            // Re-looping is inefficient but clarity > perf for 2k samples. 
+            // Better: loop once.
+            sumX = 0; sumY = 0; sumZ = 0;
+            for (const s of this.calibrationBuffer) {
+                sumX += s.gx;
+                sumY += s.gy;
+                sumZ += s.gz;
+            }
+
+            const count = this.calibrationBuffer.length;
+            this.gyroBias = {
+                x: sumX / count,
+                y: sumY / count,
+                z: sumZ / count
+            };
+
+            console.log(`Calibration Complete. Bias: x=${this.gyroBias.x.toFixed(3)}, y=${this.gyroBias.y.toFixed(3)}, z=${this.gyroBias.z.toFixed(3)}`);
+        }
+
+        // Reset trajectory state after calibration
+        this.reset();
     }
 }
 

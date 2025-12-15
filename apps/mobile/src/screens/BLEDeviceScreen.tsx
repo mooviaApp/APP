@@ -52,7 +52,20 @@ export function BLEDeviceScreen() {
         stopStreaming,
         resetIMU,
         clearError,
+        calibrateSensor, // Import the new function from hook
     } = useBLE();
+
+    // Local state for calibration loading
+    const [isCalibrating, setIsCalibrating] = React.useState(false);
+
+    const handleCalibrate = async () => {
+        setIsCalibrating(true);
+        try {
+            await calibrateSensor();
+        } finally {
+            setIsCalibrating(false);
+        }
+    };
 
     // ==========================================================================
     // Render Functions
@@ -196,10 +209,10 @@ export function BLEDeviceScreen() {
                                     icon="■"
                                 />
                                 <ControlButton
-                                    label="Reset IMU"
-                                    onPress={resetIMU}
+                                    label={isCalibrating ? "Calibrating..." : "Calibrate / Reset"}
+                                    onPress={handleCalibrate}
                                     color={COLORS.danger}
-                                    icon="↻"
+                                    icon={isCalibrating ? "⏳" : "🎯"}
                                 />
                             </View>
 

@@ -67,10 +67,10 @@ export const SENSOR_CONFIG = {
     EXPECTED_WHO_AM_I: 0x47,
 
     /** Gyroscope range in degrees per second */
-    GYRO_RANGE_DPS: 2000,
+    GYRO_RANGE_DPS: 1000,
 
     /** Accelerometer range in g */
-    ACCEL_RANGE_G: 16,
+    ACCEL_RANGE_G: 8,
 
     /** Output Data Rate in Hz (1 kHz = 1 sample per ms) */
     ODR_HZ: 1000,

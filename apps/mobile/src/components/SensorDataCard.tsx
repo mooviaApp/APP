@@ -8,6 +8,7 @@ import React from 'react';
 import { View, Text, StyleSheet, Dimensions } from 'react-native';
 import { IMUSample } from '../services/ble/constants';
 import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
+import { OrientationViz } from './OrientationViz';
 
 interface SensorDataCardProps {
     data: IMUSample | null;
@@ -45,20 +46,21 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
 
             {/* Trajectory Viz */}
             <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Trajectory (Top Down X-Y 3x3m)</Text>
+                <Text style={styles.sectionTitle}>Lift Profile (Side View: Z vs X)</Text>
                 <View style={{ width: GRAPH_SIZE, height: GRAPH_SIZE, backgroundColor: '#2E2E3E', borderRadius: 8, overflow: 'hidden', alignSelf: 'center', marginVertical: 10 }}>
-                    {/* Origin Crosshair */}
-                    <View style={{ position: 'absolute', left: CENTER, top: 0, bottom: 0, width: 1, backgroundColor: '#444' }} />
+                    {/* Grid Lines */}
+                    <View style={{ position: 'absolute', left: CENTER, top: 0, bottom: 0, width: 1, backgroundColor: '#444', borderStyle: 'dashed' }} />
                     <View style={{ position: 'absolute', top: CENTER, left: 0, right: 0, height: 1, backgroundColor: '#444' }} />
+                    <Text style={{ position: 'absolute', right: 5, top: CENTER + 5, color: '#666', fontSize: 10 }}>Z=0 (Start)</Text>
 
                     {/* Path */}
-                    {path.slice(-100).map((p, i) => (
+                    {path.slice(-150).map((p, i) => (
                         <View
                             key={i}
                             style={{
                                 position: 'absolute',
                                 left: CENTER + (p.position.x * SCALE),
-                                top: CENTER - (p.position.y * SCALE), // Invert Y for screen coords
+                                top: CENTER - (p.position.z * SCALE), // Plot Z (Height) on Vertical Axis
                                 width: 2,
                                 height: 2,
                                 backgroundColor: i === path.length - 1 || i === 99 ? '#FFF' : '#4ECDC4',
@@ -71,7 +73,7 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
                         style={{
                             position: 'absolute',
                             left: CENTER + (position.x * SCALE) - 3,
-                            top: CENTER - (position.y * SCALE) - 3,
+                            top: CENTER - (position.z * SCALE) - 3, // Profile View: Z is vertical
                             width: 6,
                             height: 6,
                             backgroundColor: '#FF6B6B',
@@ -101,6 +103,9 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
                     <DataValue label="Z" value={data.gz} color="#45B7D1" />
                 </View>
             </View>
+
+            {/* 3D Orientation Viz */}
+            <OrientationViz q={trajectoryService.getOrientation()} />
 
             {/* Timestamp */}
             <Text style={styles.timestamp}>
