@@ -52,25 +52,29 @@ export function readInt16LE(bytes: Uint8Array, offset: number): number {
 // ============================================================================
 
 /**
- * Convert raw gyroscope value to degrees per second
- * Formula: (raw / 32768.0) * range
+ * Convert raw gyroscope value to dps (degrees per second)
+ * ICM-42688-P Datasheet: ±1000 dps range → 32.8 LSB/dps
  * 
  * @param raw - Raw int16 value from sensor
  * @returns Gyroscope value in dps
  */
 export function rawToGyro(raw: number): number {
-    return (raw / 32768.0) * SENSOR_CONFIG.GYRO_RANGE_DPS;
+    // ICM-42688-P specific: GYRO_FS_SEL=1 (±1000 dps) → 32.8 LSB/dps
+    const GYRO_LSB_PER_DPS = 32.8;
+    return raw / GYRO_LSB_PER_DPS;
 }
 
 /**
  * Convert raw accelerometer value to g
- * Formula: (raw / 32768.0) * range
+ * ICM-42688-P Datasheet: ±8g range → 4096 LSB/g
  * 
  * @param raw - Raw int16 value from sensor
  * @returns Accelerometer value in g
  */
 export function rawToAccel(raw: number): number {
-    return (raw / 32768.0) * SENSOR_CONFIG.ACCEL_RANGE_G;
+    // ICM-42688-P specific: ACCEL_FS_SEL=1 (±8g) → 4096 LSB/g
+    const ACC_LSB_PER_G = 4096;
+    return raw / ACC_LSB_PER_G;
 }
 
 // ============================================================================

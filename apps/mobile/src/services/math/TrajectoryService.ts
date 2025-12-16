@@ -43,10 +43,32 @@ export class TrajectoryService {
     private segmentStartIndex: number = -1; // Index in this.path where movement started
     private segmentStartTime: number = 0;
 
+    // ZUPT Temporal Filter (50 samples = 50ms buffer)
+    private readonly ZUPT_BUFFER_SIZE = 50;
+    private gyroMagBuffer: number[] = [];
+    private accelMagBuffer: number[] = [];
+    private zuptConsecutiveCount: number = 0; // Consecutive samples meeting ZUPT criteria
+    private readonly ZUPT_MIN_CONSECUTIVE = 50; // Require 50ms of stable rest before triggering
+
     // Calibration properties
     private gyroBias = { x: 0, y: 0, z: 0 };
+    private initialQ: Quaternion = { w: 1, x: 0, y: 0, z: 0 }; // q0 (Zero frame)
     private isCalibrating: boolean = false;
     private calibrationBuffer: IMUSample[] = [];
+
+    // Auto-detected Vertical Axis (0=X, 1=Y, 2=Z)
+    // Determined during calibration by finding which axis measures ~1g
+    private verticalAxis: 0 | 1 | 2 = 2; // Default to Z
+    private verticalSign: 1 | -1 = 1; // +1 or -1 depending on orientation
+
+    // Snapshot (Manual trigger via Stream ON/OFF)
+    private liftSnapshot: TrajectoryPoint[] = []; // Frozen trajectory when streaming stops
+
+    // Lever Arm (Sensor offset from Barbell Center in Body frame)
+    // Assuming sensor is on the sleeve: ~1.1m from center (standard olympic bar)
+    // Coordinate system: X=Right, Y=Forward, Z=Up
+    // If sensor is on Right Sleeve: (+1.1, 0, 0)
+    private readonly LEVER_ARM = { x: 1.1, y: 0, z: 0 };
 
     // Constants
     private readonly SAMPLING_RATE = 1000; // 1 kHz
@@ -54,7 +76,7 @@ export class TrajectoryService {
     // Madgwick beta parameter for orientation correction (0 = no correction, higher = stronger)
     private readonly MADGWICK_BETA = 0.1;
     private readonly GRAVITY = 9.81;
-    private readonly REST_THRESHOLD = 0.08; // rad/s threshold for gyroscope to detect rest
+    private readonly REST_THRESHOLD = 0.08; // rad/s threshold for gyroscope to detect rest (~4.6 deg/s)
     private readonly ACCEL_REST_WINDOW = 0.05; // g deviation from 1g allowed for rest
 
     // Buffer for simple moving average or calibration if needed
@@ -64,6 +86,7 @@ export class TrajectoryService {
      * Reset the trajectory state
      */
     reset() {
+        // Reset to Identity, but KEEP calibration data (gyroBias, initialQ, verticalAxis)
         this.q = { w: 1, x: 0, y: 0, z: 0 };
         this.velocity = { x: 0, y: 0, z: 0 };
         this.position = { x: 0, y: 0, z: 0 };
@@ -72,6 +95,13 @@ export class TrajectoryService {
         this.isMoving = false;
         this.segmentStartIndex = -1;
         this.segmentStartTime = 0;
+
+        // Reset ZUPT temporal buffers
+        this.gyroMagBuffer = [];
+        this.accelMagBuffer = [];
+        this.zuptConsecutiveCount = 0;
+
+        // Note: liftSnapshot persists across resets (cleared manually via clearLiftSnapshot())
     }
 
     /**
@@ -92,9 +122,9 @@ export class TrajectoryService {
             return { timestamp: t, position: { ...this.position }, rotation: { ...this.q } };
         }
 
-        // Calculate actual DT if timestamps are reliable, otherwise use fixed DT
-        // Calculate actual DT if timestamps are reliable, otherwise use fixed DT
-        const dt = (t - this.lastTimestamp) / 1000.0 || this.DT;
+        // Use constant DT to avoid timestamp jump issues
+        // (timestamps can be inconsistent when unpacking 20 samples at once)
+        const dt = this.DT;
         this.lastTimestamp = t;
 
         // 1. Convert units
@@ -171,107 +201,90 @@ export class TrajectoryService {
         const worldAy = ax * (2 * x * y + 2 * z * w) + ay * (1 - 2 * x * x - 2 * z * z) + az * (2 * y * z - 2 * x * w);
         const worldAz = ax * (2 * x * z - 2 * y * w) + ay * (2 * y * z + 2 * x * w) + az * (1 - 2 * x * x - 2 * y * y);
 
-        // 4. Remove Gravity
-        // Assuming Z is up, Gravity is [0, 0, 9.81]
-        // But wait, what is the initial orientation? 
-        // We assume sensor starts flat. If not, we need calibration.
-        // For MVP: Assume Z is Up.
-        const linAccX = worldAx;
-        const linAccY = worldAy;
-        const linAccZ = worldAz - this.GRAVITY;
+        // 4. Remove Gravity (Using Quaternion)
+        // Calculate gravity vector in world frame using current orientation
+        // Gravity in sensor frame is [0, 0, -1g] (pointing down)
+        // Rotate to world frame using quaternion
+        const gWorldX = 2 * (x * z - w * y) * this.GRAVITY;
+        const gWorldY = 2 * (w * x + y * z) * this.GRAVITY;
+        const gWorldZ = (w * w - x * x - y * y + z * z) * this.GRAVITY;
 
-        // 5. Advanced ZUPT + Linear Drift Correction
+        // Linear acceleration = measured acceleration - gravity
+        const linAccX = worldAx - gWorldX;
+        const linAccY = worldAy - gWorldY;
+        const linAccZ = worldAz - gWorldZ;
+
+        // 5. Advanced ZUPT with Temporal Filtering
         const gyroMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
         const accelMag = Math.sqrt(sample.ax * sample.ax + sample.ay * sample.ay + sample.az * sample.az);
 
-        // Strict Stationary condition
-        const isStationary = gyroMag < this.REST_THRESHOLD && Math.abs(accelMag - 1.0) < this.ACCEL_REST_WINDOW;
+        // Add to buffers for moving average
+        this.gyroMagBuffer.push(gyroMag);
+        this.accelMagBuffer.push(accelMag);
+
+        // Keep buffer size limited
+        if (this.gyroMagBuffer.length > this.ZUPT_BUFFER_SIZE) {
+            this.gyroMagBuffer.shift();
+            this.accelMagBuffer.shift();
+        }
+
+        // Calculate moving averages
+        const avgGyroMag = this.gyroMagBuffer.reduce((a, b) => a + b, 0) / this.gyroMagBuffer.length;
+        const avgAccelMag = this.accelMagBuffer.reduce((a, b) => a + b, 0) / this.accelMagBuffer.length;
+
+        // Check if CURRENT sample meets rest criteria
+        const currentSampleIsRest = gyroMag < this.REST_THRESHOLD && Math.abs(accelMag - 1.0) < this.ACCEL_REST_WINDOW;
+
+        // Increment or reset consecutive counter
+        if (currentSampleIsRest) {
+            this.zuptConsecutiveCount++;
+        } else {
+            this.zuptConsecutiveCount = 0;
+        }
+
+        // ZUPT triggers only after ZUPT_MIN_CONSECUTIVE samples of rest
+        const isStationary = this.zuptConsecutiveCount >= this.ZUPT_MIN_CONSECUTIVE;
+
+        // Debug logging (every 100 samples)
+        if (this.path.length % 100 === 0) {
+            console.log(`[DEBUG] gyroMag=${gyroMag.toFixed(3)}, accelMag=${accelMag.toFixed(3)}, avgGyro=${avgGyroMag.toFixed(3)}, avgAccel=${avgAccelMag.toFixed(3)}, consecutive=${this.zuptConsecutiveCount}, isStationary=${isStationary}, isMoving=${this.isMoving}`);
+        }
 
         if (isStationary) {
             if (this.isMoving) {
                 // --- Transition: Moving -> Stationary (STOP Detected) ---
-                // 1. Calculate the Velocity Drift (Error)
-                // Theory: Velocity should be 0 now. The current this.velocity is pure accumulated error.
+                // Calculate the Velocity Drift (Error)
                 const vDriftX = this.velocity.x;
                 const vDriftY = this.velocity.y;
                 const vDriftZ = this.velocity.z;
 
-                // 2. Retroactive Correction (Piecewise Linear De-drift)
-                // We go back from segmentStartIndex to current index and subtract the linear portion of this drift.
+                // Retroactive Quadratic Correction
+                // Distribute the drift correction across the movement segment
                 if (this.segmentStartIndex !== -1 && this.segmentStartIndex < this.path.length) {
-                    const totalSemgentTime = (dt + (this.lastTimestamp - this.segmentStartTime)); // approx duration
-
-                    // Re-integrate position for the whole segment with corrected velocity
-                    // Note: We need to traverse the path from start index. 
-                    // However, this.path only stores final states. We assume the 'dt' was roughly constant or we can't perfectly reconstruct without a full buffer.
-                    // CRITICAL ASSUMPTION for this MVP: We distribute the correction linearly over the number of samples.
-                    // Correction per sample step = TotalDrift / NumSamples
-
                     const numSamples = this.path.length - this.segmentStartIndex;
-                    if (numSamples > 0) {
-                        const driftStepX = vDriftX / numSamples;
-                        const driftStepY = vDriftY / numSamples;
-                        const driftStepZ = vDriftZ / numSamples;
-
-                        // We need to re-calculate positions cumulatively from the start of the segment
-                        // Start position (before the move)
-                        let currentPosX = this.path[this.segmentStartIndex].position.x;
-                        let currentPosY = this.path[this.segmentStartIndex].position.y;
-                        let currentPosZ = this.path[this.segmentStartIndex].position.z;
-
-                        // Apply correction to each point in the history
-                        for (let i = 0; i < numSamples; i++) {
+                    if (numSamples > 1) {
+                        const T = numSamples * this.DT;
+                        // Apply quadratic correction: position error grows as 0.5 * v_drift * r^2 * T
+                        for (let i = 1; i < numSamples; i++) {
                             const idx = this.segmentStartIndex + i;
-                            // We don't have the raw velocity stored in Path, only the result.
-                            // But we can approximate the position correction.
-                            // Pos_Corrected = Pos_Original - (Integral of Linear Velocity Drift)
-                            // The velocity drift increases linearly: v_err(t) = a * t
-                            // Pos error is integral(a*t) = 0.5 * a * t^2
-                            // Let's simplify: We just subtract the wedge of drift from the end position? No, we want the whole path correct.
-
-                            // better approach: Adjust the stored position by the accumulated drift error at that point.
-                            // Error at step i (cumulative position error)
-                            // v_err[i] = i * driftStep
-                            // p_err[i] = p_err[i-1] + v_err[i] * dt
-
-                            // Let's approximate dt as this.DT or the stored timestamps
-                            // Iterative correction is safer.
-
-                            // NOTE: This modifies history in place.
-                            // Since we don't have velocity history in 'path', we can't perfectly re-integrate.
-                            // Plan B: Simplified Correction.
-                            // Just zero out the velocity now and reset.
-                            // OPTION C (User requested): "Sustraer la deriva... interpolar linealmente".
-                            // Ideally we would need a proper buffer of (Acc, dt). 
-                            // As a patch, we will just ZERO the velocity hard here. 
-                            // Implementing full replay buffer in this single file without huge allocs is risky for the user right now.
-                            // Let's stick to the Classic ZUPT: Zero velocity.
-                            // And... subtract the current velocity error from the *current* position? No, that jumps.
-
-                            // Let's implement the "Simple Linear Subtraction" to the path points:
-                            // Deviation increases quadratically? No, velocity drift is linear -> Position drift is quadratic.
-                            // For visual "return to start" (Loop closure), users often just want the drift removed.
-                            // Let's apply a linear position correction to the path to make the end point match the start point?
-                            // No, that's "Level" assumption.
-
-                            // LET'S DO: Hard ZUPT + Linear Velocity Removal from buffer?
-                            // Since I cannot rewrite the whole class to add a huge buffer array in one go safely:
-                            // I will implement the Strict ZUPT (Velocity = 0).
-                            // AND I will subtract the CURRENT accumulated velocity from the *future* integration? 
-                            // No, that's what `this.velocity = 0` does.
-
-                            // User complains: "Se aleja". 
-                            // ZUPT standard: speed -> 0.
+                            const r = i / (numSamples - 1); // Normalized time [0, 1]
+                            const corr = 0.5 * r * r * T; // Quadratic factor
+                            this.path[idx].position.x -= vDriftX * corr;
+                            this.path[idx].position.y -= vDriftY * corr;
+                            this.path[idx].position.z -= vDriftZ * corr;
                         }
+                        console.log(`[ZUPT] Corrected ${numSamples} samples with quadratic drift removal`);
                     }
                 }
 
+                console.log(`[ZUPT] STOP detected. Velocity drift: [${vDriftX.toFixed(3)}, ${vDriftY.toFixed(3)}, ${vDriftZ.toFixed(3)}] m/s`);
+
                 this.isMoving = false;
                 this.velocity = { x: 0, y: 0, z: 0 }; // Strong Zero
-                console.log("ZUPT: Stop Detected. Velocity reset.");
+                console.log("ZUPT: Velocity reset to zero.");
 
             } else {
-                // Already stationary
+                // Already stationary, keep velocity at zero
                 this.velocity = { x: 0, y: 0, z: 0 };
             }
         } else {
@@ -281,6 +294,7 @@ export class TrajectoryService {
                 this.isMoving = true;
                 this.segmentStartIndex = this.path.length; // Start recording index
                 this.segmentStartTime = t;
+                console.log("[ZUPT] START detected. Movement begins.");
             }
 
             // Integrate Velocity
@@ -294,17 +308,53 @@ export class TrajectoryService {
             this.position.z += this.velocity.z * dt;
 
             // Limit to 3x3m area (Clamping)
-            // Range: [-1.5, 1.5] for X and Y in meters
-            const LIMIT = 1.5;
+            // Floor Clamping: Z >= 0
+            if (this.position.z < 0) this.position.z = 0;
+
+            // Wall/Ceiling Clamping (3m box)
+            const LIMIT = 1.5; // [-1.5, 1.5] for X/Y
+            const CEILING = 3.0; // [0, 3.0] for Z
             this.position.x = Math.max(-LIMIT, Math.min(LIMIT, this.position.x));
             this.position.y = Math.max(-LIMIT, Math.min(LIMIT, this.position.y));
-            // Optional: Clamp Z too if needed, e.g. [0, 2.0]
+            this.position.z = Math.min(CEILING, this.position.z);
         }
+
+        // --- Apply Lever Arm Correction --- (DISABLED FOR NOW)
+        // Lever arm adds false vertical movement when sensor rotates
+        // Re-enable once base trajectory is working
+        /*
+        const r = this.LEVER_ARM;
+        const qL = this.q;
+        const xL = qL.x, yL = qL.y, zL = qL.z, wL = qL.w;
+        const worldRx = r.x * (1 - 2 * yL * yL - 2 * zL * zL) + r.y * (2 * xL * yL - 2 * zL * wL) + r.z * (2 * xL * zL + 2 * yL * wL);
+        const worldRy = r.x * (2 * xL * yL + 2 * zL * wL) + r.y * (1 - 2 * xL * xL - 2 * zL * zL) + r.z * (2 * yL * zL - 2 * xL * wL);
+        const worldRz = r.x * (2 * xL * zL - 2 * yL * wL) + r.y * (2 * yL * zL + 2 * xL * wL) + r.z * (1 - 2 * xL * xL - 2 * yL * yL);
+        const centerX = this.position.x - worldRx;
+        const centerY = this.position.y - worldRy;
+        const centerZ = this.position.z - worldRz;
+        */
+
+        // Use sensor position directly (no lever arm)
+        const centerX = this.position.x;
+        const centerY = this.position.y;
+        const centerZ = this.position.z;
+
+        // --- Relative Orientation (Visually useful) ---
+        // q_rel = q * q0_conj
+        const q0 = this.initialQ;
+        const q0Conj = { w: q0.w, x: -q0.x, y: -q0.y, z: -q0.z };
+        // Hamilton product
+        const qRel = {
+            w: q.w * q0Conj.w - q.x * q0Conj.x - q.y * q0Conj.y - q.z * q0Conj.z,
+            x: q.w * q0Conj.x + q.x * q0Conj.w + q.y * q0Conj.z - q.z * q0Conj.y,
+            y: q.w * q0Conj.y - q.x * q0Conj.z + q.y * q0Conj.w + q.z * q0Conj.x,
+            z: q.w * q0Conj.z + q.x * q0Conj.y - q.y * q0Conj.x + q.z * q0Conj.w
+        };
 
         const point: TrajectoryPoint = {
             timestamp: this.lastTimestamp,
-            position: { ...this.position },
-            rotation: { ...this.q }
+            position: { x: centerX, y: centerY, z: centerZ }, // Sensor position (no lever arm)
+            rotation: qRel // Return Relative Orientation
         };
 
         this.path.push(point);
@@ -320,6 +370,35 @@ export class TrajectoryService {
 
     getOrientation() { return this.q; }
     getVelocity() { return this.velocity; }
+
+    // Snapshot Management (Manual - triggered by Stream ON/OFF)
+    createSnapshot(): void {
+        this.liftSnapshot = [...this.path];
+        console.log(`[SNAPSHOT] Created with ${this.liftSnapshot.length} points`);
+    }
+
+    getLiftSnapshot(): TrajectoryPoint[] { return this.liftSnapshot; }
+    hasLiftSnapshot(): boolean { return this.liftSnapshot.length > 0; }
+    clearLiftSnapshot(): void {
+        this.liftSnapshot = [];
+        console.log('[SNAPSHOT] Cleared');
+    }
+
+    /**
+     * Extract vertical component from position based on detected axis
+     */
+    private getVerticalComponent(pos: Vector3): number {
+        const val = this.verticalAxis === 0 ? pos.x : (this.verticalAxis === 1 ? pos.y : pos.z);
+        return val * this.verticalSign;
+    }
+
+    /**
+     * Extract horizontal deviation (perpendicular to vertical)
+     * For simplicity, use X if vertical is Y/Z, or Y if vertical is X
+     */
+    private getHorizontalComponent(pos: Vector3): number {
+        return this.verticalAxis === 0 ? pos.y : pos.x;
+    }
 
     /**
      * Calibrate the sensor (Calculate Gyro Bias)
@@ -358,7 +437,40 @@ export class TrajectoryService {
                 z: sumZ / count
             };
 
-            console.log(`Calibration Complete. Bias: x=${this.gyroBias.x.toFixed(3)}, y=${this.gyroBias.y.toFixed(3)}, z=${this.gyroBias.z.toFixed(3)}`);
+
+            // Auto-detect Vertical Axis
+            // Calculate average acceleration magnitude for each axis
+            let sumAx = 0, sumAy = 0, sumAz = 0;
+            for (const s of this.calibrationBuffer) {
+                sumAx += s.ax;
+                sumAy += s.ay;
+                sumAz += s.az;
+            }
+            const avgAx = sumAx / count;
+            const avgAy = sumAy / count;
+            const avgAz = sumAz / count;
+
+            // Find which axis is closest to ±1g
+            const absX = Math.abs(avgAx);
+            const absY = Math.abs(avgAy);
+            const absZ = Math.abs(avgAz);
+
+            if (absX > absY && absX > absZ) {
+                this.verticalAxis = 0; // X is vertical
+                this.verticalSign = avgAx > 0 ? 1 : -1;
+            } else if (absY > absX && absY > absZ) {
+                this.verticalAxis = 1; // Y is vertical
+                this.verticalSign = avgAy > 0 ? 1 : -1;
+            } else {
+                this.verticalAxis = 2; // Z is vertical
+                this.verticalSign = avgAz > 0 ? 1 : -1;
+            }
+
+            // Capture Initial Orientation (q0)
+            this.initialQ = { ...this.q };
+
+            const axisNames = ['X', 'Y', 'Z'];
+            console.log(`Calibration Complete. Vertical: ${axisNames[this.verticalAxis]}${this.verticalSign > 0 ? '+' : '-'}, Bias: ${JSON.stringify(this.gyroBias)}`);
         }
 
         // Reset trajectory state after calibration
