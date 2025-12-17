@@ -1,482 +1,604 @@
 /**
- * Trajectory Service
+ * Error-State Kalman Filter (ESKF) Trajectory Service
  * 
- * Reconstructs 3D trajectory from 6-axis IMU data.
- * Pipeline:
- * 1. Gyro integration + Accel correction (Complementary Filter) -> Orientation (Quaternion)
- * 2. Rotate Body Accel -> World Accel
- * 3. Remove Gravity
- * 4. Double Integration: Accel -> Velocity -> Position
- * 5. Zero-Velocity Update (ZUPT) for drift control
+ * Replaces the previous Madgwick filter.
+ * 
+ * State Vector (Nominal, 16D):
+ * - Position (p): 3
+ * - Velocity (v): 3
+ * - Orientation (q): 4
+ * - Accel Bias (ab): 3
+ * - Gyro Bias (gb): 3
+ * 
+ * Error State (15D):
+ * - dp, dv, dtheta, dab, dgb
  */
 
 import { IMUSample } from '../ble/constants';
+import { Mat3 } from './Mat3';
+import { Mat15 } from './Mat15';
+import { Vec3, Vec3Math } from './Vec3';
+import { Quaternion, QuatMath } from './QuaternionMath';
 
-export interface Quaternion {
-    w: number;
-    x: number;
-    y: number;
-    z: number;
-}
-
-export interface Vector3 {
-    x: number;
-    y: number;
-    z: number;
-}
-
+// Types covering the older service API
 export interface TrajectoryPoint {
     timestamp: number;
-    position: Vector3;
+    position: Vec3;
     rotation: Quaternion;
 }
 
 export class TrajectoryService {
-    // State
+    // --- Nominal State ---
+    private p: Vec3 = { x: 0, y: 0, z: 0 };
+    private v: Vec3 = { x: 0, y: 0, z: 0 };
     private q: Quaternion = { w: 1, x: 0, y: 0, z: 0 };
-    private velocity: Vector3 = { x: 0, y: 0, z: 0 };
-    private position: Vector3 = { x: 0, y: 0, z: 0 };
-    private lastTimestamp: number = 0;
+    private ab: Vec3 = { x: 0, y: 0, z: 0 };
+    private gb: Vec3 = { x: 0, y: 0, z: 0 };
 
-    // ZUPT & Drift Correction State
-    private isMoving: boolean = false;
-    private segmentStartIndex: number = -1; // Index in this.path where movement started
-    private segmentStartTime: number = 0;
+    // --- Error Covariance 15x15 ---
+    // Stored as diagonal blocks to save space/ops, or flat array if needed.
+    // For MVP, we will store full diagonal or key blocks.
+    // Let's implement full flexible covariance logic is hard without a big matrix lib.
+    // We will track the DIAGNOAL of P (15 floats) + interactions if critical.
+    // User feedback suggested: "F depends on state... use simplified Jacobian".
+    // 
+    // To properly support updates, we really need the whole P matrix or at least the relevant blocks.
+    // Given the 15x15 size (225 floats), a flat Float64Array is trivial for mobile.
+    private P: Float64Array = new Float64Array(15 * 15);
 
-    // ZUPT Temporal Filter (50 samples = 50ms buffer)
-    private readonly ZUPT_BUFFER_SIZE = 50;
-    private gyroMagBuffer: number[] = [];
-    private accelMagBuffer: number[] = [];
-    private zuptConsecutiveCount: number = 0; // Consecutive samples meeting ZUPT criteria
-    private readonly ZUPT_MIN_CONSECUTIVE = 50; // Require 50ms of stable rest before triggering
+    // --- Constants & Tuning ---
+    private readonly GRAVITY_MAG = 9.81;
+    private readonly GRAVITY: Vec3 = { x: 0, y: 0, z: this.GRAVITY_MAG }; // World Z is up? Assume Z up for now.
 
-    // Calibration properties
-    private gyroBias = { x: 0, y: 0, z: 0 };
-    private initialQ: Quaternion = { w: 1, x: 0, y: 0, z: 0 }; // q0 (Zero frame)
-    private isCalibrating: boolean = false;
+    // Process Noise (Continuous)
+    private readonly NOISE_ACC = 0.2;  // m/s^2/sqrt(Hz)
+    private readonly NOISE_GYR = 0.1;  // rad/s/sqrt(Hz)
+    private readonly NOISE_ACC_BIAS = 0.001;
+    private readonly NOISE_GYR_BIAS = 0.0001;
+
+    // Measurement Noise
+    private readonly MEAS_NOISE_ZUPT = 0.1; // m/s velocity uncertainty
+    private readonly MEAS_NOISE_GRAVITY = 0.05; // rad tilt uncertainty
+
+    // ZUPT Detection
+    private readonly ZUPT_ACCEL_WIN = 0.25; // s
+    private readonly REST_ACCEL_THR = 0.15; // g (deviation from 1g)
+    private readonly REST_GYRO_THR = 0.1;   // rad/s
+    private accelBuffer: number[] = [];
+    private gyroBuffer: number[] = [];
+    private readonly BUFFER_SIZE = 250; // assuming 1kHz -> 250ms
+
+    // State
+    private isCalibrating = false;
     private calibrationBuffer: IMUSample[] = [];
-
-    // Auto-detected Vertical Axis (0=X, 1=Y, 2=Z)
-    // Determined during calibration by finding which axis measures ~1g
-    private verticalAxis: 0 | 1 | 2 = 2; // Default to Z
-    private verticalSign: 1 | -1 = 1; // +1 or -1 depending on orientation
-
-    // Snapshot (Manual trigger via Stream ON/OFF)
-    private liftSnapshot: TrajectoryPoint[] = []; // Frozen trajectory when streaming stops
-
-    // Lever Arm (Sensor offset from Barbell Center in Body frame)
-    // Assuming sensor is on the sleeve: ~1.1m from center (standard olympic bar)
-    // Coordinate system: X=Right, Y=Forward, Z=Up
-    // If sensor is on Right Sleeve: (+1.1, 0, 0)
-    private readonly LEVER_ARM = { x: 1.1, y: 0, z: 0 };
-
-    // Constants
-    private readonly SAMPLING_RATE = 1000; // 1 kHz
-    private readonly DT = 1.0 / this.SAMPLING_RATE;
-    // Madgwick beta parameter for orientation correction (0 = no correction, higher = stronger)
-    private readonly MADGWICK_BETA = 0.1;
-    private readonly GRAVITY = 9.81;
-    private readonly REST_THRESHOLD = 0.08; // rad/s threshold for gyroscope to detect rest (~4.6 deg/s)
-    private readonly ACCEL_REST_WINDOW = 0.05; // g deviation from 1g allowed for rest
-
-    // Buffer for simple moving average or calibration if needed
+    private lastTimestamp = 0;
     private path: TrajectoryPoint[] = [];
 
-    /**
-     * Reset the trajectory state
-     */
-    reset() {
-        // Reset to Identity, but KEEP calibration data (gyroBias, initialQ, verticalAxis)
-        this.q = { w: 1, x: 0, y: 0, z: 0 };
-        this.velocity = { x: 0, y: 0, z: 0 };
-        this.position = { x: 0, y: 0, z: 0 };
-        this.path = [];
-        this.lastTimestamp = 0;
-        this.isMoving = false;
-        this.segmentStartIndex = -1;
-        this.segmentStartTime = 0;
+    // Snapshot
+    private liftSnapshot: TrajectoryPoint[] = [];
 
-        // Reset ZUPT temporal buffers
-        this.gyroMagBuffer = [];
-        this.accelMagBuffer = [];
-        this.zuptConsecutiveCount = 0;
-
-        // Note: liftSnapshot persists across resets (cleared manually via clearLiftSnapshot())
+    constructor() {
+        this.reset();
     }
 
-    /**
-     * Process a single IMU sample
-     */
+    reset() {
+        console.log('[ESKF] Resetting state...');
+        this.p = Vec3Math.zero();
+        this.v = Vec3Math.zero();
+        this.q = QuatMath.identity();
+        // Keep biases if already calibrated? For now, reset biases to last known valid calibration or zero
+        // this.ab = Vec3Math.zero(); // Optional: keep calibrated bias?
+        // this.gb = Vec3Math.zero();
+
+        // Initialize P with small uncertainty
+        this.P.fill(0);
+        for (let i = 0; i < 15; i++) {
+            this.P[i * 15 + i] = 0.01; // Initial uncertainty
+        }
+
+        this.path = [];
+        this.lastTimestamp = 0;
+        this.accelBuffer = [];
+        this.gyroBuffer = [];
+    }
+
+    // --- Main Loop ---
+
     processSample(sample: IMUSample): TrajectoryPoint {
         const t = new Date(sample.timestamp).getTime();
 
-        // Handle first sample
-        // If calibrating, collect samples and return empty
+        // Calibration Mode
         if (this.isCalibrating) {
             this.calibrationBuffer.push(sample);
-            return { timestamp: t, position: { x: 0, y: 0, z: 0 }, rotation: { w: 1, x: 0, y: 0, z: 0 } };
+            return { timestamp: t, position: Vec3Math.zero(), rotation: QuatMath.identity() };
         }
 
         if (this.lastTimestamp === 0) {
             this.lastTimestamp = t;
-            return { timestamp: t, position: { ...this.position }, rotation: { ...this.q } };
+            return { timestamp: t, position: this.p, rotation: this.q };
         }
 
-        // Use constant DT to avoid timestamp jump issues
-        // (timestamps can be inconsistent when unpacking 20 samples at once)
-        const dt = this.DT;
+        const dt = (t - this.lastTimestamp) / 1000.0;
+        if (dt <= 0) return this.getLastPoint(); // Duplicate sample
         this.lastTimestamp = t;
 
-        // 1. Convert units
-        // 1. Convert units
-        // Gyro: dps -> rad/s (Apply Bias Correction)
-        const gx = (sample.gx - this.gyroBias.x) * (Math.PI / 180);
-        const gy = (sample.gy - this.gyroBias.y) * (Math.PI / 180);
-        const gz = (sample.gz - this.gyroBias.z) * (Math.PI / 180);
-
-        // Accel: g -> m/s^2
-        const ax = sample.ax * this.GRAVITY;
-        const ay = sample.ay * this.GRAVITY;
-        const az = sample.az * this.GRAVITY;
-
-        // SANITY CHECK: Detect sensor saturation or invalid data
-        // If values are near +/- 8g (limit), ignoring them to prevent flying into space.
-        const SATURATION_LIMIT = 7.5 * this.GRAVITY; // 7.5g (safe margin below 8g)
-        if (Math.abs(ax) > SATURATION_LIMIT || Math.abs(ay) > SATURATION_LIMIT || Math.abs(az) > SATURATION_LIMIT) {
-            console.warn('Sensor Saturation Detected! Ignoring sample.', { ax, ay, az });
-            // Returns the last point (effectively pausing)
-            if (this.path.length > 0) return this.path[this.path.length - 1];
-            // If first sample, return zero
-            return { timestamp: t, position: { ...this.position }, rotation: { ...this.q } };
-        }
-
-        // 2. Orientation Estimation (Complementary Filter mainly, simplified)
-        // Rate of change of quaternion from gyro
-        // 2. Orientation estimation (Madgwick-like)
-        // Integrate gyro to update orientation
-        const q = this.q;
-        const qDotW = 0.5 * (-q.x * gx - q.y * gy - q.z * gz);
-        const qDotX = 0.5 * (q.w * gx + q.y * gz - q.z * gy);
-        const qDotY = 0.5 * (q.w * gy - q.x * gz + q.z * gx);
-        const qDotZ = 0.5 * (q.w * gz + q.x * gy - q.y * gx);
-
-        // Pre-normalize accelerometer for correction
-        const accNorm = Math.sqrt(ax * ax + ay * ay + az * az);
-        let ex = 0, ey = 0, ez = 0;
-        if (accNorm > 0) {
-            // Normalised accelerometer direction
-            const axn = ax / accNorm;
-            const ayn = ay / accNorm;
-            const azn = az / accNorm;
-            // Estimated gravity from current quaternion
-            const vx = 2 * (q.x * q.z - q.w * q.y);
-            const vy = 2 * (q.w * q.x + q.y * q.z);
-            const vz = q.w * q.w - q.x * q.x - q.y * q.y + q.z * q.z;
-            // Error between measured and estimated gravity
-            ex = (ayn * vz - azn * vy);
-            ey = (azn * vx - axn * vz);
-            ez = (axn * vy - ayn * vx);
-        }
-        // Apply feedback (Madgwick beta)
-        const beta = this.MADGWICK_BETA;
-        this.q.w += (qDotW - beta * (ex * q.x + ey * q.y + ez * q.z)) * dt;
-        this.q.x += (qDotX + beta * (ex * q.w + ey * q.z - ez * q.y)) * dt;
-        this.q.y += (qDotY + beta * (ey * q.w - ex * q.z + ez * q.x)) * dt;
-        this.q.z += (qDotZ + beta * (ez * q.w + ex * q.y - ey * q.x)) * dt;
-
-        // Normalize quaternion
-        const norm = Math.sqrt(this.q.w ** 2 + this.q.x ** 2 + this.q.y ** 2 + this.q.z ** 2);
-        this.q.w /= norm; this.q.x /= norm; this.q.y /= norm; this.q.z /= norm;
-
-        // 3. Rotate Accel to World Frame
-        // a_world = q * a_body * q_conj
-        // Simplified rotation logic
-        const q00 = 2 * this.q.w * this.q.w; // Actually this formula is complex, let's use standard rotation matrix
-
-        // Quaternion to Rotation Matrix applied to vector (ax, ay, az)
-        // https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
-        const x = this.q.x, y = this.q.y, z = this.q.z, w = this.q.w;
-
-        const worldAx = ax * (1 - 2 * y * y - 2 * z * z) + ay * (2 * x * y - 2 * z * w) + az * (2 * x * z + 2 * y * w);
-        const worldAy = ax * (2 * x * y + 2 * z * w) + ay * (1 - 2 * x * x - 2 * z * z) + az * (2 * y * z - 2 * x * w);
-        const worldAz = ax * (2 * x * z - 2 * y * w) + ay * (2 * y * z + 2 * x * w) + az * (1 - 2 * x * x - 2 * y * y);
-
-        // 4. Remove Gravity (Using Quaternion)
-        // Calculate gravity vector in world frame using current orientation
-        // Gravity in sensor frame is [0, 0, -1g] (pointing down)
-        // Rotate to world frame using quaternion
-        const gWorldX = 2 * (x * z - w * y) * this.GRAVITY;
-        const gWorldY = 2 * (w * x + y * z) * this.GRAVITY;
-        const gWorldZ = (w * w - x * x - y * y + z * z) * this.GRAVITY;
-
-        // Linear acceleration = measured acceleration - gravity
-        const linAccX = worldAx - gWorldX;
-        const linAccY = worldAy - gWorldY;
-        const linAccZ = worldAz - gWorldZ;
-
-        // 5. Advanced ZUPT with Temporal Filtering
-        const gyroMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
-        const accelMag = Math.sqrt(sample.ax * sample.ax + sample.ay * sample.ay + sample.az * sample.az);
-
-        // Add to buffers for moving average
-        this.gyroMagBuffer.push(gyroMag);
-        this.accelMagBuffer.push(accelMag);
-
-        // Keep buffer size limited
-        if (this.gyroMagBuffer.length > this.ZUPT_BUFFER_SIZE) {
-            this.gyroMagBuffer.shift();
-            this.accelMagBuffer.shift();
-        }
-
-        // Calculate moving averages
-        const avgGyroMag = this.gyroMagBuffer.reduce((a, b) => a + b, 0) / this.gyroMagBuffer.length;
-        const avgAccelMag = this.accelMagBuffer.reduce((a, b) => a + b, 0) / this.accelMagBuffer.length;
-
-        // Check if CURRENT sample meets rest criteria
-        const currentSampleIsRest = gyroMag < this.REST_THRESHOLD && Math.abs(accelMag - 1.0) < this.ACCEL_REST_WINDOW;
-
-        // Increment or reset consecutive counter
-        if (currentSampleIsRest) {
-            this.zuptConsecutiveCount++;
-        } else {
-            this.zuptConsecutiveCount = 0;
-        }
-
-        // ZUPT triggers only after ZUPT_MIN_CONSECUTIVE samples of rest
-        const isStationary = this.zuptConsecutiveCount >= this.ZUPT_MIN_CONSECUTIVE;
-
-        // Debug logging (every 100 samples)
-        if (this.path.length % 100 === 0) {
-            console.log(`[DEBUG] gyroMag=${gyroMag.toFixed(3)}, accelMag=${accelMag.toFixed(3)}, avgGyro=${avgGyroMag.toFixed(3)}, avgAccel=${avgAccelMag.toFixed(3)}, consecutive=${this.zuptConsecutiveCount}, isStationary=${isStationary}, isMoving=${this.isMoving}`);
-        }
-
-        if (isStationary) {
-            if (this.isMoving) {
-                // --- Transition: Moving -> Stationary (STOP Detected) ---
-                // Calculate the Velocity Drift (Error)
-                const vDriftX = this.velocity.x;
-                const vDriftY = this.velocity.y;
-                const vDriftZ = this.velocity.z;
-
-                // Retroactive Quadratic Correction
-                // Distribute the drift correction across the movement segment
-                if (this.segmentStartIndex !== -1 && this.segmentStartIndex < this.path.length) {
-                    const numSamples = this.path.length - this.segmentStartIndex;
-                    if (numSamples > 1) {
-                        const T = numSamples * this.DT;
-                        // Apply quadratic correction: position error grows as 0.5 * v_drift * r^2 * T
-                        for (let i = 1; i < numSamples; i++) {
-                            const idx = this.segmentStartIndex + i;
-                            const r = i / (numSamples - 1); // Normalized time [0, 1]
-                            const corr = 0.5 * r * r * T; // Quadratic factor
-                            this.path[idx].position.x -= vDriftX * corr;
-                            this.path[idx].position.y -= vDriftY * corr;
-                            this.path[idx].position.z -= vDriftZ * corr;
-                        }
-                        console.log(`[ZUPT] Corrected ${numSamples} samples with quadratic drift removal`);
-                    }
-                }
-
-                console.log(`[ZUPT] STOP detected. Velocity drift: [${vDriftX.toFixed(3)}, ${vDriftY.toFixed(3)}, ${vDriftZ.toFixed(3)}] m/s`);
-
-                this.isMoving = false;
-                this.velocity = { x: 0, y: 0, z: 0 }; // Strong Zero
-                console.log("ZUPT: Velocity reset to zero.");
-
-            } else {
-                // Already stationary, keep velocity at zero
-                this.velocity = { x: 0, y: 0, z: 0 };
-            }
-        } else {
-            // Not stationary
-            if (!this.isMoving) {
-                // Transition: Stationary -> Moving (START)
-                this.isMoving = true;
-                this.segmentStartIndex = this.path.length; // Start recording index
-                this.segmentStartTime = t;
-                console.log("[ZUPT] START detected. Movement begins.");
-            }
-
-            // Integrate Velocity
-            this.velocity.x += linAccX * dt;
-            this.velocity.y += linAccY * dt;
-            this.velocity.z += linAccZ * dt;
-
-            // Integrate Position
-            this.position.x += this.velocity.x * dt;
-            this.position.y += this.velocity.y * dt;
-            this.position.z += this.velocity.z * dt;
-
-            // Limit to 3x3m area (Clamping)
-            // Floor Clamping: Z >= 0
-            if (this.position.z < 0) this.position.z = 0;
-
-            // Wall/Ceiling Clamping (3m box)
-            const LIMIT = 1.5; // [-1.5, 1.5] for X/Y
-            const CEILING = 3.0; // [0, 3.0] for Z
-            this.position.x = Math.max(-LIMIT, Math.min(LIMIT, this.position.x));
-            this.position.y = Math.max(-LIMIT, Math.min(LIMIT, this.position.y));
-            this.position.z = Math.min(CEILING, this.position.z);
-        }
-
-        // --- Apply Lever Arm Correction --- (DISABLED FOR NOW)
-        // Lever arm adds false vertical movement when sensor rotates
-        // Re-enable once base trajectory is working
-        /*
-        const r = this.LEVER_ARM;
-        const qL = this.q;
-        const xL = qL.x, yL = qL.y, zL = qL.z, wL = qL.w;
-        const worldRx = r.x * (1 - 2 * yL * yL - 2 * zL * zL) + r.y * (2 * xL * yL - 2 * zL * wL) + r.z * (2 * xL * zL + 2 * yL * wL);
-        const worldRy = r.x * (2 * xL * yL + 2 * zL * wL) + r.y * (1 - 2 * xL * xL - 2 * zL * zL) + r.z * (2 * yL * zL - 2 * xL * wL);
-        const worldRz = r.x * (2 * xL * zL - 2 * yL * wL) + r.y * (2 * yL * zL + 2 * xL * wL) + r.z * (1 - 2 * xL * xL - 2 * yL * yL);
-        const centerX = this.position.x - worldRx;
-        const centerY = this.position.y - worldRy;
-        const centerZ = this.position.z - worldRz;
-        */
-
-        // Use sensor position directly (no lever arm)
-        const centerX = this.position.x;
-        const centerY = this.position.y;
-        const centerZ = this.position.z;
-
-        // --- Relative Orientation (Visually useful) ---
-        // q_rel = q * q0_conj
-        const q0 = this.initialQ;
-        const q0Conj = { w: q0.w, x: -q0.x, y: -q0.y, z: -q0.z };
-        // Hamilton product
-        const qRel = {
-            w: q.w * q0Conj.w - q.x * q0Conj.x - q.y * q0Conj.y - q.z * q0Conj.z,
-            x: q.w * q0Conj.x + q.x * q0Conj.w + q.y * q0Conj.z - q.z * q0Conj.y,
-            y: q.w * q0Conj.y - q.x * q0Conj.z + q.y * q0Conj.w + q.z * q0Conj.x,
-            z: q.w * q0Conj.z + q.x * q0Conj.y - q.y * q0Conj.x + q.z * q0Conj.w
+        // 1. Unpack Raw Measurements
+        // Assume sample already scaled by decoder? Yes (g and dps) => Wait, decoder uses 'g' and 'dps'
+        // We need m/s^2 and rad/s
+        const a_meas: Vec3 = {
+            x: sample.ax * 9.81,
+            y: sample.ay * 9.81,
+            z: sample.az * 9.81
+        };
+        const w_meas: Vec3 = {
+            x: sample.gx * (Math.PI / 180),
+            y: sample.gy * (Math.PI / 180),
+            z: sample.gz * (Math.PI / 180)
         };
 
+        // 2. Prediction Step (Integrate Nominal + Covariance)
+        this.predict(a_meas, w_meas, dt);
+
+        // 3. Stationary Detection (ZUPT Trigger)
+        this.updateBuffers(a_meas, w_meas);
+        const isStat = this.isStationary();
+        if (isStat) {
+            this.applyZUPT();
+            this.applyGravityAlignment(a_meas);
+        }
+
+        // Debug Logs (every 50 samples ~ 0.5s)
+        if (this.path.length % 50 === 0) {
+            console.log(`[ESKF] t:${t / 1000} P:[${this.p.x.toFixed(3)},${this.p.y.toFixed(3)},${this.p.z.toFixed(3)}] V:[${this.v.x.toFixed(3)},${this.v.y.toFixed(3)},${this.v.z.toFixed(3)}] ZUPT:${isStat}`);
+        }
+
+        // 4. Save and Return Point
         const point: TrajectoryPoint = {
-            timestamp: this.lastTimestamp,
-            position: { x: centerX, y: centerY, z: centerZ }, // Sensor position (no lever arm)
-            rotation: qRel // Return Relative Orientation
+            timestamp: t,
+            position: { ...this.p },
+            rotation: { ...this.q }
         };
-
         this.path.push(point);
         return point;
     }
 
-    /**
-     * Get the current path points
-     */
-    getPath(): TrajectoryPoint[] {
-        return this.path;
+    // --- ESKF Prediction ---
+
+    private predict(a_meas: Vec3, w_meas: Vec3, dt: number) {
+        // Correct measurements with current bias estimates
+        const a_hat = Vec3Math.sub(a_meas, this.ab);
+        const w_hat = Vec3Math.sub(w_meas, this.gb);
+
+        // 1. Nominal State Integration
+        const R = QuatMath.toRotationMatrix(this.q);
+        const acc_world = R.multiplyVec(a_hat);
+        const acc_net = { x: acc_world.x, y: acc_world.y, z: acc_world.z - this.GRAVITY_MAG };
+
+        this.p = Vec3Math.add(this.p, Vec3Math.add(Vec3Math.scale(this.v, dt), Vec3Math.scale(acc_net, 0.5 * dt * dt)));
+        this.v = Vec3Math.add(this.v, Vec3Math.scale(acc_net, dt));
+        this.q = QuatMath.integrate(this.q, w_hat, dt);
+
+        // 2. Error State Transition Matrix (F) and Covariance Propagation
+        // F is 15x15. We construct it explicitly.
+        const F = Mat15.identity();
+
+        // Block: dp/dv (Identity * dt)
+        F.set(0, 3, dt); F.set(1, 4, dt); F.set(2, 5, dt);
+
+        // Block: dv/dtheta (skew(R*a_hat) * dt) ?? No, it's -R * skew(a_hat) * dt
+        // R_a_hat = R * a_hat
+        const Ra_hat = R.multiplyVec(a_hat);
+        // skew(Ra_hat)
+        // [  0    -az   ay ]
+        // [  az    0   -ax ]
+        // [ -ay   ax    0  ]
+        // But the term in error dynamics for v_dot error is -R * skew(a_hat) * dtheta (local error) ? 
+        // Standard ESKF (Sola): v_dot_err = -R * skew(a_hat) * dtheta - R * da_b
+        // Actually, skew(R * a_hat) is global frame. -skew(Ra_hat) * dtheta_global? 
+        // Let's stick to standard error definitions: dtheta is GLOBAL error.
+        // Then v_dot_err = -skew(acc_world) * dtheta - R * da_b
+
+        const F_v_theta = new Mat3([
+            0, -acc_world.z, acc_world.y,
+            acc_world.z, 0, -acc_world.x,
+            -acc_world.y, acc_world.x, 0
+        ]).scale(-dt); // -skew * dt
+
+        // Inject 3x3 block F_v_theta into F (rows 3,4,5, cols 6,7,8)
+        for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) F.set(3 + r, 6 + c, F_v_theta.get(r, c));
+
+        // Block: dv/da_b (-R * dt)
+        const F_v_ab = R.scale(-dt);
+        for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) F.set(3 + r, 9 + c, F_v_ab.get(r, c));
+
+        // Block: dtheta/dtheta (Identity approx for small w, strictly exp(-skew(w)*dt))
+        // dtheta_new = dtheta - R * dgb * dt (if local error)
+        // If dtheta is global, dtheta_dot = -skew(w_hat) * dtheta - R * dgb ??
+        // Simplified: I for small dt.
+
+        // Block: dtheta/dg_b (-R * dt)
+        const F_theta_gb = R.scale(-dt);
+        for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) F.set(6 + r, 12 + c, F_theta_gb.get(r, c));
+
+        // Propagate P = F * P * F^T + Q
+        // Load P into Mat15 wrapper
+        const P_mat = new Mat15();
+        P_mat.data.set(this.P);
+
+        const P_pred = F.multiplyFPFt(P_mat);
+
+        // Add Process Noise Q (Diagonal approximation)
+        // We add noise variance * dt (Random Walk)
+        P_pred.addDiagonal([
+            0, 0, 0, // Pos (implicitly 0)
+            (this.NOISE_ACC ** 2) * dt, (this.NOISE_ACC ** 2) * dt, (this.NOISE_ACC ** 2) * dt,
+            (this.NOISE_GYR ** 2) * dt, (this.NOISE_GYR ** 2) * dt, (this.NOISE_GYR ** 2) * dt,
+            (this.NOISE_ACC_BIAS ** 2) * dt, (this.NOISE_ACC_BIAS ** 2) * dt, (this.NOISE_ACC_BIAS ** 2) * dt,
+            (this.NOISE_GYR_BIAS ** 2) * dt, (this.NOISE_GYR_BIAS ** 2) * dt, (this.NOISE_GYR_BIAS ** 2) * dt
+        ]);
+
+        // Save back to Float64Array
+        this.P.set(P_pred.data);
     }
 
-    getOrientation() { return this.q; }
-    getVelocity() { return this.velocity; }
+    // --- ZUPT Update (Correct) ---
 
-    // Snapshot Management (Manual - triggered by Stream ON/OFF)
-    createSnapshot(): void {
-        this.liftSnapshot = [...this.path];
-        console.log(`[SNAPSHOT] Created with ${this.liftSnapshot.length} points`);
-    }
+    private applyZUPT() {
+        // H = [0, I, 0, 0, 0] (3x15)
+        // K = P * H^T * (H*P*H^T + R)^-1
 
-    getLiftSnapshot(): TrajectoryPoint[] { return this.liftSnapshot; }
-    hasLiftSnapshot(): boolean { return this.liftSnapshot.length > 0; }
-    clearLiftSnapshot(): void {
-        this.liftSnapshot = [];
-        console.log('[SNAPSHOT] Cleared');
-    }
+        const P_mat = new Mat15();
+        P_mat.data.set(this.P);
 
-    /**
-     * Extract vertical component from position based on detected axis
-     */
-    private getVerticalComponent(pos: Vector3): number {
-        const val = this.verticalAxis === 0 ? pos.x : (this.verticalAxis === 1 ? pos.y : pos.z);
-        return val * this.verticalSign;
-    }
+        // 1. Extract H*P*H^T = P_vv (3x3 block at 3,3)
+        const P_vv = new Mat3([
+            P_mat.get(3, 3), P_mat.get(3, 4), P_mat.get(3, 5),
+            P_mat.get(4, 3), P_mat.get(4, 4), P_mat.get(4, 5),
+            P_mat.get(5, 3), P_mat.get(5, 4), P_mat.get(5, 5)
+        ]);
 
-    /**
-     * Extract horizontal deviation (perpendicular to vertical)
-     * For simplicity, use X if vertical is Y/Z, or Y if vertical is X
-     */
-    private getHorizontalComponent(pos: Vector3): number {
-        return this.verticalAxis === 0 ? pos.y : pos.x;
-    }
+        // 2. S = P_vv + R
+        const noise = this.MEAS_NOISE_ZUPT * this.MEAS_NOISE_ZUPT; // Variance
+        const R_cov = Mat3.fromDiagonal([noise, noise, noise]);
+        const S = P_vv.add(R_cov);
+        const S_inv = S.invert();
 
-    /**
-     * Calibrate the sensor (Calculate Gyro Bias)
-     * Keeps the sensor stationary for 'durationMs' and averages the gyro readings.
-     */
-    async calibrateAsync(durationMs: number = 2000): Promise<void> {
-        console.log('Starting Calibration...');
-        this.isCalibrating = true;
-        this.calibrationBuffer = [];
+        // 3. Compute K (15x3) = P * H^T * S_inv
+        // H^T selects columns 3,4,5 of P
+        // So for row i, K_i = P_i(v) * S_inv
+        const K = new Float64Array(15 * 3);
 
-        // Wait for samples to collect
-        await new Promise(resolve => setTimeout(resolve, durationMs));
+        // We also need K for P update later: P_new = (I - K*H) * P
+        // which is P_new = P - K * (H * P)
+        // H * P is just rows 3,4,5 of P.
 
-        this.isCalibrating = false;
-
-        if (this.calibrationBuffer.length > 0) {
-            // Calculate Average Gyro Bias
-            let sumX = 0, sumY = 0, sumZ = 0;
-            this.calibrationBuffer.forEach(s => sumX += s.gx);
-            this.calibrationBuffer.forEach(s => sumY += s.gy);
-            this.calibrationBuffer.forEach(s => sumZ += s.gz); // Correct summing
-
-            // Re-looping is inefficient but clarity > perf for 2k samples. 
-            // Better: loop once.
-            sumX = 0; sumY = 0; sumZ = 0;
-            for (const s of this.calibrationBuffer) {
-                sumX += s.gx;
-                sumY += s.gy;
-                sumZ += s.gz;
-            }
-
-            const count = this.calibrationBuffer.length;
-            this.gyroBias = {
-                x: sumX / count,
-                y: sumY / count,
-                z: sumZ / count
+        for (let i = 0; i < 15; i++) {
+            // Row i of P, cols 3..5
+            const p_row_v = {
+                x: P_mat.get(i, 3),
+                y: P_mat.get(i, 4),
+                z: P_mat.get(i, 5)
             };
-
-
-            // Auto-detect Vertical Axis
-            // Calculate average acceleration magnitude for each axis
-            let sumAx = 0, sumAy = 0, sumAz = 0;
-            for (const s of this.calibrationBuffer) {
-                sumAx += s.ax;
-                sumAy += s.ay;
-                sumAz += s.az;
-            }
-            const avgAx = sumAx / count;
-            const avgAy = sumAy / count;
-            const avgAz = sumAz / count;
-
-            // Find which axis is closest to ±1g
-            const absX = Math.abs(avgAx);
-            const absY = Math.abs(avgAy);
-            const absZ = Math.abs(avgAz);
-
-            if (absX > absY && absX > absZ) {
-                this.verticalAxis = 0; // X is vertical
-                this.verticalSign = avgAx > 0 ? 1 : -1;
-            } else if (absY > absX && absY > absZ) {
-                this.verticalAxis = 1; // Y is vertical
-                this.verticalSign = avgAy > 0 ? 1 : -1;
-            } else {
-                this.verticalAxis = 2; // Z is vertical
-                this.verticalSign = avgAz > 0 ? 1 : -1;
-            }
-
-            // Capture Initial Orientation (q0)
-            this.initialQ = { ...this.q };
-
-            const axisNames = ['X', 'Y', 'Z'];
-            console.log(`Calibration Complete. Vertical: ${axisNames[this.verticalAxis]}${this.verticalSign > 0 ? '+' : '-'}, Bias: ${JSON.stringify(this.gyroBias)}`);
+            const k_row = S_inv.multiplyVec(p_row_v); // Symmetric S_inv
+            K[i * 3 + 0] = k_row.x;
+            K[i * 3 + 1] = k_row.y;
+            K[i * 3 + 2] = k_row.z;
         }
 
-        // Reset trajectory state after calibration
+        // 4. Update State
+        // y = 0 - v
+        const dx = new Float64Array(15);
+        for (let i = 0; i < 15; i++) {
+            dx[i] = K[i * 3 + 0] * (-this.v.x) + K[i * 3 + 1] * (-this.v.y) + K[i * 3 + 2] * (-this.v.z);
+        }
+        this.injectError(dx);
+
+        // 5. Update Covariance: P = P - K * (H * P)
+        // H*P extracts rows 3,4,5 of P.
+        // Let M = H*P (3x15 matrix)
+        const M = new Float64Array(3 * 15);
+        for (let r = 0; r < 3; r++) {
+            for (let c = 0; c < 15; c++) {
+                M[r * 15 + c] = P_mat.get(3 + r, c); // Row 3,4,5
+            }
+        }
+
+        // P_new = P - K * M
+        for (let r = 0; r < 15; r++) {
+            for (let c = 0; c < 15; c++) {
+                let sum = 0;
+                // K[r] (row r of K, length 3) dot M[col c] (col c of M, length 3)
+                // K is 15x3. K(r, k)
+                // M is 3x15. M(k, c)
+                for (let k = 0; k < 3; k++) {
+                    sum += K[r * 3 + k] * M[k * 15 + c];
+                }
+                const oldVal = P_mat.get(r, c);
+                P_mat.set(r, c, oldVal - sum);
+            }
+        }
+
+        // Enforce symmetry just in case
+        // ... (optional but good practice)
+
+        this.P.set(P_mat.data);
+    }
+
+    // --- Gravity Alignment Update ---
+
+    private applyGravityAlignment(a_meas: Vec3) {
+        // Measurement: Accel direction should be global UP [0,0,1]
+        // Observation vector z = Normalize(a_meas). Expected h(x) = R^T * [0,0,1].
+        // But simpler: Project residual in global frame.
+        // Accel_global_pred = R * a_hat. Expected = [0,0,g].
+        // Difference comes from Orientation Error.
+        // Res = Accel_global_pred - [0,0,g_mag]. 
+        // Logic: d(Accel_global) / dtheta = -skew(Accel_global).
+        // H = [0, 0, -skew(g), 0, 0] (3x15).
+
+        // Use normalized gravity to avoid magnitude issues if bias is bad?
+        // Let's use gravity vector matching.
+
+        const P_mat = new Mat15();
+        P_mat.data.set(this.P);
+
+        // Predict gravity in world frame (should be [0,0,g])
+        // Current: R * a_meas
+        const R = QuatMath.toRotationMatrix(this.q);
+        const a_world = R.multiplyVec(Vec3Math.sub(a_meas, this.ab));
+
+        // Residual y = a_world - [0, 0, g]
+        // Actually, measurement is a_world, prediction is [0,0,g]
+        const y_res = {
+            x: a_world.x - 0,
+            y: a_world.y - 0,
+            z: a_world.z - this.GRAVITY_MAG
+        };
+
+        // H matrix for global gravity error vs state error
+        // Pos/Vel: 0. Biases: complicated. Orientation: Main driver.
+        // H_theta = -skew([0,0,g]) = [0 g 0; -g 0 0; 0 0 0]
+        const g = this.GRAVITY_MAG;
+        const H_theta = new Mat3([
+            0, g, 0,
+            -g, 0, 0,
+            0, 0, 0
+        ]);
+
+        // Construct H (3x15). Blocks: 0, 0, H_theta, 0, 0.
+        // ...
+        // We'll proceed effectively by extracting relevant blocks of P.
+        // H only touches cols 6,7,8.
+
+        // S = H * P * H^T + R
+        // S = H_theta * P_theta_theta * H_theta^T + R_meas
+        const P_tt = new Mat3([
+            P_mat.get(6, 6), P_mat.get(6, 7), P_mat.get(6, 8),
+            P_mat.get(7, 6), P_mat.get(7, 7), P_mat.get(7, 8),
+            P_mat.get(8, 6), P_mat.get(8, 7), P_mat.get(8, 8)
+        ]);
+
+        // H * P_tt
+        const HPtt = H_theta.multiply(P_tt);
+        // (H * P_tt) * H^T
+        const HPttHt = HPtt.multiply(H_theta.transpose());
+
+        const noise = this.MEAS_NOISE_GRAVITY * this.MEAS_NOISE_GRAVITY;
+        const S = HPttHt.add(Mat3.fromDiagonal([noise, noise, noise]));
+
+        // Invert S
+        // Note: S might be singular if g aligns with axes perfectly? No, noise prevents it.
+        const S_inv = S.invert();
+
+        // K = P * H^T * S_inv
+        // H^T is 15x3, non-zero at rows 6,7,8.
+        // H^T_theta = [0 -g 0; g 0 0; 0 0 0]
+        const Ht_theta = H_theta.transpose();
+
+        const K = new Float64Array(15 * 3);
+
+        for (let i = 0; i < 15; i++) {
+            // P row i, cols 6..8
+            // We multiply P_row_theta (1x3) * Ht_theta (3x3)
+            const p_i_theta = { x: P_mat.get(i, 6), y: P_mat.get(i, 7), z: P_mat.get(i, 8) };
+            // Manual mul: 
+            // res = [
+            //   p.x*Ht00 + p.y*Ht10 + p.z*Ht20,
+            //   p.x*Ht01 + p.y*Ht11...
+            // ]
+            // Simpler: Use Mat3 mulVec but carefully?
+            // Ht_theta is:
+            // [ 0 -g  0]
+            // [ g  0  0]
+            // [ 0  0  0]
+
+            // res.x = p.y * g
+            // res.y = p.x * -g
+            // res.z = 0
+
+            const PHt_x = p_i_theta.y * g;
+            const PHt_y = p_i_theta.x * -g;
+            const PHt_z = 0;
+
+            // Multiply by S_inv (3x3)
+            const k_row = S_inv.multiplyVec({ x: PHt_x, y: PHt_y, z: PHt_z });
+            K[i * 3 + 0] = k_row.x;
+            K[i * 3 + 1] = k_row.y;
+            K[i * 3 + 2] = k_row.z;
+        }
+
+        // Apply Correction to State
+        // dx = K * y_res
+        const dx = new Float64Array(15);
+        for (let i = 0; i < 15; i++) {
+            dx[i] = K[i * 3 + 0] * y_res.x + K[i * 3 + 1] * y_res.y + K[i * 3 + 2] * y_res.z;
+        }
+        this.injectError(dx);
+
+        // Update P = P - K*H*P
+        // H*P only involves rows 6,7,8 of P, multiplied by H_theta.
+        // M = H*P (3x15).
+        // Col j of M = H_theta * P_col_j_theta (3x1 vector P[6..8, j])
+        const M = new Float64Array(3 * 15);
+        for (let c = 0; c < 15; c++) {
+            const p_cj = { x: P_mat.get(6, c), y: P_mat.get(7, c), z: P_mat.get(8, c) };
+            // H_theta * p_cj
+            // x: p.y * g (Wait, H_theta row 0 is [0 g 0]) -> P[7,c]*g
+            // y: p.x * -g -> P[6,c]*-g
+            // z: 0
+            M[0 * 15 + c] = p_cj.y * g;
+            M[1 * 15 + c] = p_cj.x * -g;
+            M[2 * 15 + c] = 0;
+        }
+
+        // P -= K*M
+        for (let r = 0; r < 15; r++) {
+            for (let c = 0; c < 15; c++) {
+                let sum = 0;
+                for (let k = 0; k < 3; k++) sum += K[r * 3 + k] * M[k * 15 + c];
+                P_mat.set(r, c, P_mat.get(r, c) - sum);
+            }
+        }
+        this.P.set(P_mat.data);
+    }
+
+    private injectError(dx: Float64Array) {
+        // 1. Position
+        this.p.x += dx[0];
+        this.p.y += dx[1];
+        this.p.z += dx[2];
+
+        // 2. Velocity
+        this.v.x += dx[3];
+        this.v.y += dx[4];
+        this.v.z += dx[5];
+
+        // 3. Orientation
+        // dtheta is a small rotation vector
+        const dtheta = { x: dx[6], y: dx[7], z: dx[8] };
+        // q_new = q_nom * Quat(dtheta)
+        // Ensure small angle approx
+        const dq = QuatMath.fromOneHalfTheta(dtheta);
+        this.q = QuatMath.multiply(this.q, dq);
+        this.q = QuatMath.normalize(this.q);
+
+        // 4. Biases
+        this.ab.x += dx[9];
+        this.ab.y += dx[10];
+        this.ab.z += dx[11];
+
+        this.gb.x += dx[12];
+        this.gb.y += dx[13];
+        this.gb.z += dx[14];
+
+        // Reset Error State (conceptually 0)
+    }
+
+    // --- Helpers ---
+
+    private updateBuffers(a: Vec3, w: Vec3) {
+        const a_mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+        const w_mag = Math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
+
+        this.accelBuffer.push(a_mag);
+        this.gyroBuffer.push(w_mag);
+
+        if (this.accelBuffer.length > this.BUFFER_SIZE) this.accelBuffer.shift();
+        if (this.gyroBuffer.length > this.BUFFER_SIZE) this.gyroBuffer.shift();
+    }
+
+    private isStationary(): boolean {
+        if (this.accelBuffer.length < this.BUFFER_SIZE) return false;
+
+        const avgA = this.accelBuffer.reduce((s, v) => s + v, 0) / this.accelBuffer.length;
+        const avgW = this.gyroBuffer.reduce((s, v) => s + v, 0) / this.gyroBuffer.length;
+
+        // Check 1: Gyro Low
+        if (avgW > this.REST_GYRO_THR) return false;
+
+        // Check 2: Accel near gravity (9.81)
+        if (Math.abs(avgA - this.GRAVITY_MAG) > (this.REST_ACCEL_THR * 9.81)) return false;
+
+        return true;
+    }
+
+    // --- Public API ---
+
+    getPath() { return this.path; }
+    getOrientation() { return this.q; }
+    getVelocity() { return this.v; }
+
+    // Calibration (Simplified)
+    async calibrateAsync(durationMs: number = 2000) {
+        console.log('[ESKF] Starting Calibration...');
+        this.isCalibrating = true;
+        this.calibrationBuffer = [];
+        await new Promise(r => setTimeout(r, durationMs));
+        this.isCalibrating = false;
+
+        if (this.calibrationBuffer.length < 10) return;
+
+        // 1. Gyro Bias
+        let sumGx = 0, sumGy = 0, sumGz = 0;
+        let sumAx = 0, sumAy = 0, sumAz = 0;
+
+        this.calibrationBuffer.forEach(s => {
+            sumGx += s.gx; sumGy += s.gy; sumGz += s.gz;
+            sumAx += s.ax; sumAy += s.ay; sumAz += s.az;
+        });
+
+        const count = this.calibrationBuffer.length;
+        // Decoder already gives dps/g, convert to rad/s and m/s^2 for ESKF internal
+        const radFactor = Math.PI / 180;
+        const gFactor = 9.81;
+
+        this.gb = {
+            x: (sumGx / count) * radFactor,
+            y: (sumGy / count) * radFactor,
+            z: (sumGz / count) * radFactor
+        };
+
+        // 2. Initial Orientation & Accel Bias
+        // Assume Z is Vertical (or auto-detect like before).
+        // If we assume Z is Vertical UP in World Frame:
+        // Expected Gravity in World: [0, 0, 9.81]
+        // Measured Accel in Body: a_avg
+        // We can compute initial Roll/Pitch from a_avg.
+        // Then set Initial Accel Bias = 0 (assume calibrated during manufacturing) OR
+        // set bias = measured - expected. But "expected" depends on Q.
+
+        // MVP: Assume flat start on table => Q = Identity.
+        // Accel Bias = Measured - [0, 0, 9.81].
+        const avgAx = (sumAx / count) * gFactor;
+        const avgAy = (sumAy / count) * gFactor;
+        const avgAz = (sumAz / count) * gFactor;
+
+        // Auto-detect vertical logic could go here, but let's assume flat for MVP test
+        this.ab = {
+            x: avgAx,
+            y: avgAy,
+            z: avgAz - 9.81
+        };
+
+        console.log(`[ESKF] Calibrated. GB: [${this.gb.x.toFixed(3)}, ${this.gb.y.toFixed(3)}, ${this.gb.z.toFixed(3)}], AB: [${this.ab.x.toFixed(3)}, ${this.ab.y.toFixed(3)}, ${this.ab.z.toFixed(3)}]`);
+
+        // Reset state but PRESERVE biases
+        const savedAB = this.ab;
+        const savedGB = this.gb;
         this.reset();
+        this.ab = savedAB;
+        this.gb = savedGB;
+    }
+
+    // Snapshot API
+    createSnapshot() { this.liftSnapshot = [...this.path]; }
+    getLiftSnapshot() { return this.liftSnapshot; }
+    hasLiftSnapshot() { return this.liftSnapshot.length > 0; }
+    clearLiftSnapshot() { this.liftSnapshot = []; }
+
+    private getLastPoint(): TrajectoryPoint {
+        return this.path.length > 0 ? this.path[this.path.length - 1] : { timestamp: 0, position: Vec3Math.zero(), rotation: QuatMath.identity() };
     }
 }
 
-// Singleton
 export const trajectoryService = new TrajectoryService();
