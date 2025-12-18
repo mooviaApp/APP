@@ -528,7 +528,34 @@ export class TrajectoryService {
     getOrientation() { return this.q; }
     getVelocity() { return this.v; }
 
-    // Calibration (Simplified)
+    // Función auxiliar matemática
+    // Calcula el cuaternión (Body -> World) que alinea la aceleración medida con el eje Z vertical [0,0,1]
+    private getRotationFromGravity(ax: number, ay: number, az: number): Quaternion {
+        // 1. Normalizar el vector de aceleración (dirección "ARRIBA" medida por el sensor)
+        const norm = Math.sqrt(ax * ax + ay * ay + az * az);
+        if (norm === 0) return QuatMath.identity();
+
+        const u = { x: ax / norm, y: ay / norm, z: az / norm };
+
+        // 2. Queremos la rotación q tal que R(q) * u = [0,0,1] (Mundo)
+        // El eje de rotación es el producto cruz: u x [0,0,1] = [u.y, -u.x, 0]
+        const crossX = u.y;
+        const crossY = -u.x;
+        const dot = u.z; // Producto punto entre u y [0,0,1]
+
+        // Casos límite
+        if (dot > 0.9999) return QuatMath.identity();
+        if (dot < -0.9999) return { w: 0, x: 1, y: 0, z: 0 }; // Inversión total (180 grados en X)
+
+        // Fórmula de medio ángulo para alineación de vectores
+        const w = 1 + dot;
+        const x = crossX;
+        const y = crossY;
+        const z = 0;
+
+        return QuatMath.normalize({ w, x, y, z });
+    }
+
     async calibrateAsync(durationMs: number = 2000) {
         console.log('[ESKF] Starting Calibration...');
         this.isCalibrating = true;
@@ -538,56 +565,47 @@ export class TrajectoryService {
 
         if (this.calibrationBuffer.length < 10) return;
 
-        // 1. Gyro Bias
+        // --- 1. Cálculo de Biases ---
         let sumGx = 0, sumGy = 0, sumGz = 0;
         let sumAx = 0, sumAy = 0, sumAz = 0;
 
-        this.calibrationBuffer.forEach(s => {
+        for (const s of this.calibrationBuffer) {
             sumGx += s.gx; sumGy += s.gy; sumGz += s.gz;
             sumAx += s.ax; sumAy += s.ay; sumAz += s.az;
-        });
+        }
 
         const count = this.calibrationBuffer.length;
-        // Decoder already gives dps/g, convert to rad/s and m/s^2 for ESKF internal
         const radFactor = Math.PI / 180;
         const gFactor = 9.81;
 
+        // Sesgo del giroscopio (en rad/s)
         this.gb = {
             x: (sumGx / count) * radFactor,
             y: (sumGy / count) * radFactor,
             z: (sumGz / count) * radFactor
         };
 
-        // 2. Initial Orientation & Accel Bias
-        // Assume Z is Vertical (or auto-detect like before).
-        // If we assume Z is Vertical UP in World Frame:
-        // Expected Gravity in World: [0, 0, 9.81]
-        // Measured Accel in Body: a_avg
-        // We can compute initial Roll/Pitch from a_avg.
-        // Then set Initial Accel Bias = 0 (assume calibrated during manufacturing) OR
-        // set bias = measured - expected. But "expected" depends on Q.
+        // Sesgo del acelerómetro: Lo dejamos en 0 (asumimos calibración de fábrica)
+        this.ab = { x: 0, y: 0, z: 0 };
 
-        // MVP: Assume flat start on table => Q = Identity.
-        // Accel Bias = Measured - [0, 0, 9.81].
+        // --- 2. Orientación Inicial ---
         const avgAx = (sumAx / count) * gFactor;
         const avgAy = (sumAy / count) * gFactor;
         const avgAz = (sumAz / count) * gFactor;
 
-        // Auto-detect vertical logic could go here, but let's assume flat for MVP test
-        this.ab = {
-            x: avgAx,
-            y: avgAy,
-            z: avgAz - 9.81
-        };
+        // Calculamos la rotación inicial basada en la gravedad
+        const initialQ = this.getRotationFromGravity(avgAx, avgAy, avgAz);
 
-        console.log(`[ESKF] Calibrated. GB: [${this.gb.x.toFixed(3)}, ${this.gb.y.toFixed(3)}, ${this.gb.z.toFixed(3)}], AB: [${this.ab.x.toFixed(3)}, ${this.ab.y.toFixed(3)}, ${this.ab.z.toFixed(3)}]`);
+        console.log(`[ESKF] Calibrated. Gravity Detect: [${avgAx.toFixed(2)}, ${avgAy.toFixed(2)}, ${avgAz.toFixed(2)}]`);
+        console.log(`[ESKF] Initial Q calculated: [${initialQ.w.toFixed(3)}, ${initialQ.x.toFixed(3)}, ${initialQ.y.toFixed(3)}, ${initialQ.z.toFixed(3)}]`);
 
-        // Reset state but PRESERVE biases
-        const savedAB = this.ab;
-        const savedGB = this.gb;
+        // --- 3. Reinicio del Estado ---
         this.reset();
-        this.ab = savedAB;
-        this.gb = savedGB;
+
+        // Asignamos la orientación inicial calculada
+        this.q = initialQ;
+
+        // P es reiniciado en reset(), pero los biases (ab, gb) se mantienen porque no se limpian allí.
     }
 
     // Snapshot API

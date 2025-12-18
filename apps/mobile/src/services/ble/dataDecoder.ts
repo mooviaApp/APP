@@ -4,7 +4,7 @@
  * Functions for decoding BLE notification data from the MOOVIA sensor.
  * Handles int16 little-endian conversion and physical unit conversion.
  * 
- * Updated for firmware v2: 20 samples per packet at 1 kHz ODR
+ * Updated for firmware v2: 15 samples per packet at 1 kHz ODR
  */
 
 import { decode as base64Decode } from 'base-64';
@@ -84,49 +84,41 @@ export function rawToAccel(raw: number): number {
 /**
  * Decode IMU sample data packet with 20 aggregated samples
  * 
- * Packet structure (241 bytes):
+ * Packet structure (181 bytes):
  * - Byte 0: Message type (0x02)
  * - Bytes 1-12: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE)
  * - Bytes 13-24: Sample 2
- * - ... (continues for 20 samples total)
- * - Bytes 229-240: Sample 20
+ * - ... (continues for 15 samples total)
+ * - Bytes 169-180: Sample 15
  * 
  * @param bytes - Raw byte array from BLE notification
- * @returns Array of 20 decoded IMU samples with physical units
+ * @returns Array of 15 decoded IMU samples with physical units
  */
 export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
-    // Expected size: 241 bytes
-    // Byte 0: 0x02
-    // Bytes 1..240: 20 samples * 12 bytes
-    const expectedSize = SENSOR_CONFIG.PACKET_SIZE_BYTES;
+    // Dynamic Packet Size Handling
+    const payloadSize = bytes.length - 1;
+    const BYTES_PER_SAMPLE = 12;
 
-    if (bytes.length < expectedSize) {
-        // Log error but don't throw if just slightly off/fragmented, though for now we enforce strict size
-        // Mark as warning to avoid crashing app loop
-        console.warn(`Invalid IMU packet length: ${bytes.length} (expected ${expectedSize})`);
-        // If we want to return partial, we could, but let's strictly return empty array if bad
+    if (payloadSize % BYTES_PER_SAMPLE !== 0) {
+        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (Payload ${payloadSize} not multiple of 12)`);
         return [];
     }
 
+    const sampleCount = payloadSize / BYTES_PER_SAMPLE;
+
     if (bytes[0] !== MESSAGE_TYPES.SAMPLE) {
-        console.warn(`Invalid message type: 0x${bytes[0].toString(16)} (expected 0x02)`);
+        console.warn(`[BLE-ERR] Invalid message type: 0x${bytes[0].toString(16)} (expected 0x02)`);
         return [];
     }
 
     const samples: IMUSample[] = [];
-    // Use current time as base, but subtract latency if needed. 
-    // Here we assume packet just arrived.
-    // The samples are 1ms apart, last one is "now".
-    // So sample 0 is (now - 19ms), sample 19 is (now).
+    // Use current time as base.
+    // We assume samples are 1ms apart (1kHz).
+    // Timestamp strategy: Last sample is "now", previous are -1ms, -2ms...
     const now = Date.now();
-    const baseTimestamp = now - ((SENSOR_CONFIG.SAMPLES_PER_PACKET - 1) * SENSOR_CONFIG.SAMPLE_INTERVAL_MS);
 
-    // Parse 20 samples starting from byte 1
-    for (let i = 0; i < SENSOR_CONFIG.SAMPLES_PER_PACKET; i++) {
-        const offset = 1 + (i * SENSOR_CONFIG.BYTES_PER_SAMPLE);
-
-        // Safety check for bounds
-        if (offset + 12 > bytes.length) break;
+    for (let i = 0; i < sampleCount; i++) {
+        const offset = 1 + (i * BYTES_PER_SAMPLE);
 
         // Read raw int16 values for this sample
         // Little Endian
@@ -138,7 +130,9 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
         const rawGz = readInt16LE(bytes, offset + 10);
 
         // Calculate timestamp for this sample
-        const sampleTimestamp = new Date(baseTimestamp + (i * SENSOR_CONFIG.SAMPLE_INTERVAL_MS)).toISOString();
+        // sample[i] time = now - (total - 1 - i) * interval
+        const timeOffset = (sampleCount - 1 - i) * SENSOR_CONFIG.SAMPLE_INTERVAL_MS;
+        const sampleTimestamp = new Date(now - timeOffset).toISOString();
 
         // Convert to physical units and add to array
         samples.push({
@@ -241,7 +235,7 @@ export function decodeNotification(base64Data: string): IMUSample[] | LogMessage
                 return decodeWHOAMI(bytes);
 
             default:
-                console.warn(`Unknown message type: 0x${messageType.toString(16)}`);
+                console.warn(`[BLE-DEBUG] Unknown message type: 0x${messageType.toString(16)}`);
                 return null;
         }
     } catch (error) {

@@ -45,7 +45,7 @@ export const BLE_COMMANDS = {
 // ============================================================================
 
 export const MESSAGE_TYPES = {
-    /** IMU sample data packet (241 bytes: type + 20 samples × 12 bytes) */
+    /** IMU sample data packet (181 bytes: type + 15 samples × 12 bytes) */
     SAMPLE: 0x02,
 
     /** Log message (ASCII text) */
@@ -76,25 +76,25 @@ export const SENSOR_CONFIG = {
     ODR_HZ: 1000,
 
     /** Number of samples per BLE packet from firmware */
-    SAMPLES_PER_PACKET: 20,
+    SAMPLES_PER_PACKET: 15,
 
     /** Bytes per sample (6 int16 values = 12 bytes) */
     BYTES_PER_SAMPLE: 12,
 
-    /** Total packet size (1 byte type + 20 samples × 12 bytes) */
-    PACKET_SIZE_BYTES: 241,
+    /** Total packet size (1 byte type + 15 samples × 12 bytes) */
+    PACKET_SIZE_BYTES: 181,
 
     /** Expected sample interval in ms (1 ms per sample) */
     SAMPLE_INTERVAL_MS: 1,
 
-    /** Packet interval in ms (20 samples at 1 kHz = 20 ms) */
-    PACKET_INTERVAL_MS: 20,
+    /** Packet interval in ms (15 samples at 1 kHz = 15 ms) */
+    PACKET_INTERVAL_MS: 15,
 
     /** Batch size for sending to backend (number of packets to accumulate) */
-    BATCH_SIZE_PACKETS: 3, // 3 packets × 20 samples = 60 samples ≈ 60 ms
+    BATCH_SIZE_PACKETS: 4, // 4 packets × 15 samples = 60 samples = 60 ms
 
     /** Total samples in a batch for backend */
-    BATCH_SIZE_SAMPLES: 60, // 3 packets × 20 samples
+    BATCH_SIZE_SAMPLES: 60, // 4 packets × 15 samples
 } as const;
 
 // ============================================================================

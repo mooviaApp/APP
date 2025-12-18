@@ -248,7 +248,7 @@ export class BLEService {
             this.reconnectAttempts = 0;
             this.emit({ type: 'connected', data: { device } });
 
-            console.log('Successfully connected and configured. Ready to stream.');
+            console.log(`Successfully connected and configured. PKT_SIZE: ${SENSOR_CONFIG.PACKET_SIZE_BYTES}. [VER: 20251218_1540]`);
 
         } catch (error: any) {
             console.error('Connection failed:', error);
@@ -353,28 +353,24 @@ export class BLEService {
 
     /**
      * Handle data characteristic notification (IMU samples)
-     * Now receives 20 samples per packet
+     * Now receives 15 samples per packet
      */
     private handleDataNotification(base64Data: string): void {
         try {
             const rawBytes = decodeBase64ToBytes(base64Data);
 
-            // DEBUG LOGGING
-            if (rawBytes.length != SENSOR_CONFIG.PACKET_SIZE_BYTES || Math.random() < 0.05) {
-                // Log if invalid length or randomly for health check
-                const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-                const msg = `Rx Data: Len=${rawBytes.length}, Header=${rawBytes[0]?.toString(16) || '??'}, Bytes: [${hexPreview}...]`;
-                if (rawBytes.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
-                    console.warn('INVALID PKT LEN: ' + msg);
-                } else {
-                    console.log(msg);
-                }
+            // EXPLICIT LOGGING FOR FIRMWARE VERIFICATION
+            const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+            console.log(`[AI-LOG] t:${Date.now()} Len:${rawBytes.length} H:${rawBytes[0]?.toString(16).padStart(2, '0')} Bytes:[${hexPreview}...]`);
+
+            if (rawBytes.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
+                console.warn(`[AI-LOG] WARNING: Unexpected packet length: ${rawBytes.length} (Expected ${SENSOR_CONFIG.PACKET_SIZE_BYTES})`);
             }
 
             const decoded = decodeNotification(base64Data);
 
             if (decoded && Array.isArray(decoded)) {
-                // It's an array of IMU samples (20 samples per packet)
+                // It's an array of IMU samples (15 samples per packet)
                 const samples = decoded as IMUSample[];
 
                 // Add all samples to buffer
