@@ -230,25 +230,46 @@ export class BLEService {
             // 3. Enable notifications (Samples & Logs) BEFORE MTU/Start
             await this.enableNotifications();
 
-            // 4. Request MTU
-            console.log(`Requesting MTU: ${BLE_CONFIG.REQUIRED_MTU}`);
-            try {
-                // Wait small delay to ensure notifying is settled? Usually not needed if awaited.
-                const updatedDevice = await device.requestMTU(BLE_CONFIG.REQUIRED_MTU);
-                const mtu = updatedDevice.mtu || BLE_CONFIG.REQUIRED_MTU;
-                console.log(`MTU negotiated: ${mtu} bytes`);
+            // 4. Request MTU (CRITICAL for 181-byte packets)
+            console.log(`[BLE] Requesting MTU: ${BLE_CONFIG.REQUIRED_MTU}`);
+            let negotiatedMTU = 23; // Default MTU if negotiation fails
 
-                if (mtu < BLE_CONFIG.REQUIRED_MTU) {
-                    console.warn(`WARNING: Negotiated MTU ${mtu} < Required ${BLE_CONFIG.REQUIRED_MTU}. Packets may be truncated!`);
+            try {
+                const updatedDevice = await device.requestMTU(BLE_CONFIG.REQUIRED_MTU);
+                negotiatedMTU = updatedDevice.mtu || BLE_CONFIG.REQUIRED_MTU;
+
+                // CRITICAL: Wait for MTU to be applied by firmware
+                await new Promise(r => setTimeout(r, 100));
+
+                console.log(`[BLE] ✅ MTU negotiated: ${negotiatedMTU} bytes`);
+
+                if (negotiatedMTU < 185) {
+                    const errorMsg = `CRITICAL: MTU ${negotiatedMTU} < 185. Cannot receive 181-byte packets!`;
+                    console.error(`[BLE] ${errorMsg}`);
+                    throw new Error(errorMsg);
                 }
             } catch (error: any) {
-                console.warn('MTU negotiation failed, proceeding anyway:', error.message);
+                console.error('[BLE] MTU negotiation FAILED:', error.message);
+                throw new Error(`MTU negotiation failed: ${error.message}`);
+            }
+
+            // 5. Request high connection priority for 1kHz streaming
+            try {
+                await device.requestConnectionPriority(2); // 2 = HIGH priority
+                console.log('[BLE] ✅ Connection priority set to HIGH');
+            } catch (error: any) {
+                console.warn('[BLE] Connection priority request failed (non-critical):', error.message);
             }
 
             this.reconnectAttempts = 0;
             this.emit({ type: 'connected', data: { device } });
 
-            console.log(`Successfully connected and configured. PKT_SIZE: ${SENSOR_CONFIG.PACKET_SIZE_BYTES}. [VER: 20251218_1540]`);
+            console.log(`[BLE] ========================================`);
+            console.log(`[BLE] ✅ CONNECTED AND CONFIGURED`);
+            console.log(`[BLE] MTU: ${negotiatedMTU} bytes`);
+            console.log(`[BLE] Packet Size: ${SENSOR_CONFIG.PACKET_SIZE_BYTES} bytes`);
+            console.log(`[BLE] Ready for streaming`);
+            console.log(`[BLE] ========================================`);
 
         } catch (error: any) {
             console.error('Connection failed:', error);
@@ -317,12 +338,15 @@ export class BLEService {
                 BLE_CHARACTERISTICS.DATA,
                 (error, characteristic) => {
                     if (error) {
-                        console.error('Data notification error:', error);
+                        console.error('[BLE-DATA] Notification error:', error);
                         return;
                     }
 
                     if (characteristic?.value) {
+                        // console.log('[BLE-DATA] ✅ Received packet!');
                         this.handleDataNotification(characteristic.value);
+                    } else {
+                        console.warn('[BLE-DATA] Received notification but no value');
                     }
                 }
             );
@@ -343,7 +367,8 @@ export class BLEService {
                 }
             );
 
-            console.log('Notifications enabled');
+            // console.log('[BLE] ✅ Notifications enabled on DATA and LOG characteristics');
+            // console.log('[BLE] Waiting for first packet...');
 
         } catch (error: any) {
             console.error('Failed to enable notifications:', error);
@@ -359,9 +384,9 @@ export class BLEService {
         try {
             const rawBytes = decodeBase64ToBytes(base64Data);
 
-            // EXPLICIT LOGGING FOR FIRMWARE VERIFICATION
-            const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-            console.log(`[AI-LOG] t:${Date.now()} Len:${rawBytes.length} H:${rawBytes[0]?.toString(16).padStart(2, '0')} Bytes:[${hexPreview}...]`);
+            // EXPLICIT LOGGING FOR FIRMWARE VERIFICATION (commented out for production)
+            // const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+            // console.log(`[AI-LOG] t:${Date.now()} Len:${rawBytes.length} H:${rawBytes[0]?.toString(16).padStart(2, '0')} Bytes:[${hexPreview}...]`);
 
             if (rawBytes.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
                 console.warn(`[AI-LOG] WARNING: Unexpected packet length: ${rawBytes.length} (Expected ${SENSOR_CONFIG.PACKET_SIZE_BYTES})`);

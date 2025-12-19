@@ -102,8 +102,8 @@ export const SENSOR_CONFIG = {
 // ============================================================================
 
 export const BLE_CONFIG = {
-    /** Required MTU size for 241-byte packets (241 + 3 bytes overhead + margin) */
-    REQUIRED_MTU: 247,
+    /** Required MTU size for 181-byte packets (181 + 3 bytes overhead + margin) */
+    REQUIRED_MTU: 184,
 
     /** Scan timeout in milliseconds */
     SCAN_TIMEOUT_MS: 10000,

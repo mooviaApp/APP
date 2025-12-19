@@ -1,21 +1,40 @@
-/**
- * Sensor Data Card Component
- * 
- * Displays real-time sensor readings from the MOOVIA IMU.
- */
-
-import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Dimensions } from 'react-native';
-import Svg, { Line, Circle, Polyline, G, Text as SvgText } from 'react-native-svg';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, Dimensions, TouchableOpacity } from 'react-native';
+import Svg, { Line, Circle, Polyline } from 'react-native-svg';
 import { IMUSample } from '../services/ble/constants';
-import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
+import { trajectoryService } from '../services/math/TrajectoryService';
 import { OrientationViz } from './OrientationViz';
 
 interface SensorDataCardProps {
     data: IMUSample | null;
 }
 
+type LiftState = 'IDLE' | 'LIFTING' | 'RESULT';
+
 export function SensorDataCard({ data }: SensorDataCardProps) {
+    const [liftState, setLiftState] = useState<LiftState>('IDLE');
+    const [snapshotPath, setSnapshotPath] = useState<any[]>([]);
+
+    // Use robust ZUPT-based detection instead of simple velocity threshold
+    const isStationary = trajectoryService.isStationary();
+    const isMoving = !isStationary;
+
+    // State machine: IDLE → LIFTING → RESULT
+    useEffect(() => {
+        if (liftState === 'IDLE' && isMoving) {
+            setLiftState('LIFTING');
+            console.log('[UI] State: IDLE → LIFTING');
+        }
+        else if (liftState === 'LIFTING' && !isMoving) {
+            // Movement stopped → Save snapshot and show result
+            trajectoryService.createSnapshot();
+            const correctedPath = trajectoryService.getLiftSnapshot();
+            setSnapshotPath(correctedPath);
+            setLiftState('RESULT');
+            console.log('[UI] State: LIFTING → RESULT');
+        }
+    }, [isMoving, liftState]);
+
     if (!data) {
         return (
             <View style={styles.container}>
@@ -25,161 +44,120 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
         );
     }
 
-    // Get current trajectory state direct from service (since it's singleton and sync)
-    // In a real app we might want a hook/subscription, but for MVP this works since we re-render on 'data' change
-    const path = trajectoryService.getPath();
-    const lastPoint = path[path.length - 1];
-    const position = lastPoint?.position || { x: 0, y: 0, z: 0 };
+    // --- STATE: LIFTING (Only numbers, no graph) ---
+    if (liftState === 'LIFTING') {
+        const path = trajectoryService.getPath();
+        const currentPoint = path.length > 0 ? path[path.length - 1] : null;
+        const height = currentPoint?.relativePosition.z || 0;
+        const velocity = trajectoryService.getVelocity();
 
-    // Snapshot State
-    const liftSnapshot = trajectoryService.getLiftSnapshot();
-    const hasSnapshot = trajectoryService.hasLiftSnapshot();
+        return (
+            <View style={[styles.container, styles.liftingContainer]}>
+                <Text style={styles.liftingTitle}>⚡ RECORDING LIFT</Text>
 
-    // Simple 2D Path Visualization (Top-Down X-Y)
-    // Responsive Path Visualization
-    const screenWidth = Dimensions.get('window').width;
-    const GRAPH_SIZE = screenWidth - 60; // Padding
-    const CENTER = GRAPH_SIZE / 2;
+                <View style={styles.bigMetric}>
+                    <Text style={styles.metricLabel}>HEIGHT</Text>
+                    <Text style={styles.metricValue}>{height.toFixed(2)}</Text>
+                    <Text style={styles.metricUnit}>meters</Text>
+                </View>
 
-    // Scale: Map 3m range [-1.5, 1.5] to graph size
-    // 300px / 3m = 100 px/m
-    const SCALE = GRAPH_SIZE / 3.0;
+                <View style={styles.bigMetric}>
+                    <Text style={styles.metricLabel}>VELOCITY</Text>
+                    <Text style={styles.metricValue}>{velocity.z.toFixed(2)}</Text>
+                    <Text style={styles.metricUnit}>m/s</Text>
+                </View>
+            </View>
+        );
+    }
 
-    return (
-        <View style={styles.container}>
-            <Text style={styles.title}>Real-Time Sensor Data</Text>
+    // --- STATE: RESULT (Show graph) ---
+    if (liftState === 'RESULT') {
+        const screenWidth = Dimensions.get('window').width;
+        const GRAPH_SIZE = screenWidth - 60;
+        const SCALE = 200;
+        const CENTER_X = GRAPH_SIZE / 2;
+        const CENTER_Y = GRAPH_SIZE;
 
-            {/* Trajectory Viz (SVG) - LIVE VIEW */}
-            <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Live Trajectory</Text>
-                <View style={{ width: GRAPH_SIZE, height: GRAPH_SIZE, backgroundColor: '#2E2E3E', borderRadius: 8, alignSelf: 'center', marginVertical: 10 }}>
+        const toScreen = (relP: { x: number, y: number, z: number }) => {
+            return {
+                x: CENTER_X + (relP.x * SCALE),
+                y: CENTER_Y - (relP.z * SCALE)
+            };
+        };
+
+        const polylinePoints = snapshotPath.map(p => {
+            const s = toScreen(p.relativePosition);
+            return `${s.x},${s.y}`;
+        }).join(' ');
+
+        // Calculate max height
+        const maxHeight = Math.max(...snapshotPath.map(p => p.relativePosition.z), 0);
+
+        return (
+            <View style={styles.container}>
+                <View style={styles.headerRow}>
+                    <Text style={styles.title}>Lift Complete</Text>
+                    <TouchableOpacity onPress={() => {
+                        trajectoryService.resetKinematics();
+                        setLiftState('IDLE');
+                        console.log('[UI] State: RESULT → IDLE');
+                    }}>
+                        <Text style={styles.newRepButton}>🔄 NEW REP</Text>
+                    </TouchableOpacity>
+                </View>
+
+                <View style={styles.statsRow}>
+                    <View style={styles.statBox}>
+                        <Text style={styles.statLabel}>Max Height</Text>
+                        <Text style={styles.statValue}>{maxHeight.toFixed(2)} m</Text>
+                    </View>
+                    <View style={styles.statBox}>
+                        <Text style={styles.statLabel}>Points</Text>
+                        <Text style={styles.statValue}>{snapshotPath.length}</Text>
+                    </View>
+                </View>
+
+                <View style={styles.graphContainer}>
                     <Svg height={GRAPH_SIZE} width={GRAPH_SIZE}>
-                        {/* Grid & Reference Lines */}
-                        <Line x1={CENTER} y1="0" x2={CENTER} y2={GRAPH_SIZE} stroke="#444" strokeWidth="1" strokeDasharray="4 4" />
-                        <Line x1="0" y1={CENTER} x2={GRAPH_SIZE} y2={CENTER} stroke="#444" strokeWidth="1" />
-                        <SvgText x={GRAPH_SIZE - 5} y={CENTER + 12} fill="#666" fontSize="10" textAnchor="end">Z=0 (Start)</SvgText>
+                        <Line x1="0" y1={CENTER_Y} x2={GRAPH_SIZE} y2={CENTER_Y} stroke="#666" strokeWidth="2" />
+                        <Line x1={CENTER_X} y1="0" x2={CENTER_X} y2={GRAPH_SIZE} stroke="#444" strokeWidth="1" strokeDasharray="5,5" />
 
-                        {/* Trajectory Path (Last 150 points for performance) */}
-                        <Polyline
-                            points={path.slice(-150).map(p => {
-                                // Use auto-detected vertical axis for height
-                                const vertAxis = (trajectoryService as any).verticalAxis || 2;
-                                const vertSign = (trajectoryService as any).verticalSign || 1;
-                                const height = vertAxis === 0 ? p.position.x * vertSign :
-                                    (vertAxis === 1 ? p.position.y * vertSign : p.position.z * vertSign);
-                                const deviation = vertAxis === 0 ? p.position.y : p.position.x;
+                        {polylinePoints && (
+                            <Polyline
+                                points={polylinePoints}
+                                fill="none"
+                                stroke="#1DF09F"
+                                strokeWidth="4"
+                            />
+                        )}
 
-                                const x = CENTER + (deviation * SCALE);
-                                const y = CENTER - (height * SCALE); // Height is vertical
-                                return `${x},${y}`;
-                            }).join(' ')}
-                            fill="none"
-                            stroke="#1DF09F"
-                            strokeWidth="2"
-                        />
-
-                        {/* Head Indicator */}
-                        <Circle
-                            cx={CENTER + (((trajectoryService as any).verticalAxis === 0 ? position.y : position.x) * SCALE)}
-                            cy={CENTER - ((((trajectoryService as any).verticalAxis || 2) === 0 ? position.x :
-                                (((trajectoryService as any).verticalAxis || 2) === 1 ? position.y : position.z)) *
-                                (((trajectoryService as any).verticalSign || 1)) * SCALE)}
-                            r="4"
-                            fill="#FF6B6B"
-                            stroke="#FFF"
-                            strokeWidth="1"
-                        />
+                        <Circle cx={CENTER_X} cy={CENTER_Y} r="6" fill="white" stroke="#1DF09F" strokeWidth="2" />
                     </Svg>
                 </View>
-                <Text style={styles.timestamp}>Pos: [{position.x.toFixed(2)}, {position.y.toFixed(2)}, {position.z.toFixed(2)}] m</Text>
+
+                <Text style={styles.hintText}>Tap NEW REP to start again</Text>
             </View>
+        );
+    }
 
-            {/* Snapshot View - Only shown after lift completes */}
-            {hasSnapshot && (
-                <View style={styles.section}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <Text style={styles.sectionTitle}>Last Lift Snapshot</Text>
-                        <Text
-                            style={styles.clearButton}
-                            onPress={() => trajectoryService.clearLiftSnapshot()}
-                        >
-                            Clear
-                        </Text>
-                    </View>
-                    <View style={{ width: GRAPH_SIZE, height: GRAPH_SIZE, backgroundColor: '#2E2E3E', borderRadius: 8, alignSelf: 'center', marginVertical: 10 }}>
-                        <Svg height={GRAPH_SIZE} width={GRAPH_SIZE}>
-                            {/* Grid */}
-                            <Line x1={CENTER} y1="0" x2={CENTER} y2={GRAPH_SIZE} stroke="#444" strokeWidth="1" strokeDasharray="4 4" />
-                            <Line x1="0" y1={CENTER} x2={GRAPH_SIZE} y2={CENTER} stroke="#666" strokeWidth="2" />
-                            <SvgText x={GRAPH_SIZE - 5} y={CENTER + 12} fill="#888" fontSize="10" textAnchor="end">Floor</SvgText>
-
-                            {/* Snapshot Trajectory (Downsampled for performance) */}
-                            <Polyline
-                                points={liftSnapshot.filter((_, i) => i % 2 === 0).map(p => {
-                                    const vertAxis = (trajectoryService as any).verticalAxis || 2;
-                                    const vertSign = (trajectoryService as any).verticalSign || 1;
-                                    const height = vertAxis === 0 ? p.position.x * vertSign :
-                                        (vertAxis === 1 ? p.position.y * vertSign : p.position.z * vertSign);
-                                    const deviation = vertAxis === 0 ? p.position.y : p.position.x;
-
-                                    const x = CENTER + (deviation * SCALE);
-                                    const y = CENTER - (height * SCALE);
-                                    return `${x},${y}`;
-                                }).join(' ')}
-                                fill="none"
-                                stroke="#FFD700"
-                                strokeWidth="2"
-                            />
-                        </Svg>
-                    </View>
-                    <Text style={styles.timestamp}>
-                        Duration: {(liftSnapshot.length / 1000).toFixed(2)}s | Points: {liftSnapshot.length}
-                    </Text>
-                </View>
-            )}
-
-            {/* Accelerometer */}
-            <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Accelerometer (g)</Text>
-                <View style={styles.row}>
-                    <DataValue label="X" value={data.ax} color="#FF6B6B" />
-                    <DataValue label="Y" value={data.ay} color="#4ECDC4" />
-                    <DataValue label="Z" value={data.az} color="#45B7D1" />
-                </View>
-            </View>
-
-            {/* Gyroscope */}
-            <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Gyroscope (dps)</Text>
-                <View style={styles.row}>
-                    <DataValue label="X" value={data.gx} color="#FF6B6B" />
-                    <DataValue label="Y" value={data.gy} color="#4ECDC4" />
-                    <DataValue label="Z" value={data.gz} color="#45B7D1" />
-                </View>
-            </View>
-
-            {/* 3D Orientation Viz */}
-            <OrientationViz q={trajectoryService.getOrientation()} />
-
-            {/* Timestamp */}
-            <Text style={styles.timestamp}>
-                Last update: {new Date(data.timestamp).toLocaleTimeString()}
-            </Text>
-        </View>
-    );
-}
-
-interface DataValueProps {
-    label: string;
-    value: number;
-    color: string;
-}
-
-function DataValue({ label, value, color }: DataValueProps) {
+    // --- STATE: IDLE (Waiting) ---
     return (
-        <View style={styles.dataValue}>
-            <Text style={[styles.label, { color }]}>{label}</Text>
-            <Text style={styles.value}>{value.toFixed(3)}</Text>
+        <View style={styles.container}>
+            <Text style={styles.title}>Ready to Lift</Text>
+            <Text style={styles.hintText}>Start your movement when ready</Text>
+
+            <TouchableOpacity
+                style={styles.calibrateButton}
+                onPress={() => {
+                    trajectoryService.calibrateAsync(5000);
+                    console.log('[UI] User pressed CALIBRATE');
+                }}
+            >
+                <Text style={styles.calibrateButtonText}>⚙️ CALIBRATE SENSOR</Text>
+                <Text style={styles.calibrateHint}>Place sensor still for 5 seconds</Text>
+            </TouchableOpacity>
+
+            <OrientationViz q={trajectoryService.getOrientation()} />
         </View>
     );
 }
@@ -190,64 +168,97 @@ const styles = StyleSheet.create({
         borderRadius: 16,
         padding: 20,
         marginVertical: 12,
+        minHeight: 200,
+        justifyContent: 'center'
+    },
+    liftingContainer: {
+        borderColor: '#1DF09F',
+        borderWidth: 3,
+        shadowColor: '#1DF09F',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.5,
+        shadowRadius: 10,
+    },
+    liftingTitle: {
+        color: '#1DF09F',
+        fontSize: 18,
+        fontWeight: '900',
+        textAlign: 'center',
+        letterSpacing: 2,
+        marginBottom: 30
+    },
+    bigMetric: {
+        alignItems: 'center',
+        marginVertical: 20
+    },
+    metricLabel: {
+        color: '#888',
+        fontSize: 14,
+        fontWeight: '700',
+        letterSpacing: 1,
+        marginBottom: 8
+    },
+    metricValue: {
+        color: '#1DF09F',
+        fontSize: 72,
+        fontWeight: '900',
+        fontFamily: 'monospace'
+    },
+    metricUnit: {
+        color: '#888',
+        fontSize: 16,
+        fontWeight: '600',
+        marginTop: 4
+    },
+    graphContainer: {
+        backgroundColor: '#252535',
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        marginBottom: 20,
+        borderColor: '#333',
+        borderWidth: 1
     },
     title: {
         fontSize: 18,
         fontWeight: '700',
         color: '#FFFFFF',
-        marginBottom: 16,
     },
-    section: {
-        marginBottom: 16,
-    },
-    sectionTitle: {
-        fontSize: 14,
-        fontWeight: '600',
-        color: '#A0A0B0',
-        marginBottom: 8,
-    },
-    row: {
+    headerRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-    },
-    dataValue: {
-        flex: 1,
         alignItems: 'center',
+        marginBottom: 16
     },
-    label: {
-        fontSize: 12,
-        fontWeight: '600',
-        marginBottom: 4,
-    },
-    value: {
-        fontSize: 20,
-        fontWeight: '700',
-        color: '#FFFFFF',
-    },
-    timestamp: {
-        color: '#666',
-        fontSize: 11,
-        marginTop: 4,
-        textAlign: 'center',
-        fontFamily: 'monospace',
-    },
-    statusBadge: {
-        fontSize: 11,
-        color: '#888',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 12,
-        backgroundColor: '#333',
-    },
-    statusActive: {
-        color: '#FF6B6B',
-        backgroundColor: '#3E2020',
-    },
-    clearButton: {
-        fontSize: 12,
+    newRepButton: {
         color: '#1DF09F',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
+        fontSize: 14,
+        fontWeight: '700',
+        letterSpacing: 1
+    },
+    statsRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-around',
+        marginBottom: 20,
+        paddingVertical: 15,
+        backgroundColor: '#252535',
+        borderRadius: 12
+    },
+    statBox: {
+        alignItems: 'center'
+    },
+    statLabel: {
+        color: '#888',
+        fontSize: 11,
+        fontWeight: '600',
+        marginBottom: 5
+    },
+    statValue: {
+        color: '#FFF',
+        fontSize: 24,
+        fontWeight: '700',
+        fontFamily: 'monospace'
     },
     noDataText: {
         fontSize: 16,
@@ -259,5 +270,27 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: '#707080',
         textAlign: 'center',
+        marginTop: 10
     },
+    calibrateButton: {
+        backgroundColor: '#333',
+        paddingVertical: 20,
+        paddingHorizontal: 30,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#555',
+        marginVertical: 20,
+        alignItems: 'center'
+    },
+    calibrateButtonText: {
+        color: '#FFF',
+        fontWeight: '700',
+        fontSize: 16,
+        marginBottom: 4
+    },
+    calibrateHint: {
+        color: '#888',
+        fontSize: 12,
+        fontWeight: '500'
+    }
 });

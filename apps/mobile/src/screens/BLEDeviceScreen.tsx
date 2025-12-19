@@ -67,6 +67,15 @@ export function BLEDeviceScreen() {
         }
     };
 
+    const handleReset = async () => {
+        try {
+            await resetIMU();
+            console.log('[UI] Kinematic reset performed');
+        } catch (error) {
+            console.error('[UI] Reset failed:', error);
+        }
+    };
+
     // ==========================================================================
     // Render Functions
     // ==========================================================================
@@ -208,11 +217,21 @@ export function BLEDeviceScreen() {
                                     color={COLORS.warning}
                                     icon="■"
                                 />
+                            </View>
+
+                            {/* Calibration and Reset Row */}
+                            <View style={styles.controlGrid}>
                                 <ControlButton
-                                    label={isCalibrating ? "Calibrating..." : "Calibrate / Reset"}
+                                    label={isCalibrating ? "Calibrating..." : "Calibrate"}
                                     onPress={handleCalibrate}
-                                    color={COLORS.danger}
-                                    icon={isCalibrating ? "⏳" : "🎯"}
+                                    color="#FF6B35"
+                                    icon={isCalibrating ? "⏳" : "⚙️"}
+                                />
+                                <ControlButton
+                                    label="Reset"
+                                    onPress={handleReset}
+                                    color="#4ECDC4"
+                                    icon="🔄"
                                 />
                             </View>
 

@@ -250,6 +250,11 @@ export function useBLE(): UseBLEResult {
             setError(null);
             await bleService.startStreaming();
 
+            // CRITICAL: Wait for BLE notifications to fully activate
+            // Without this delay, the first packets are lost (race condition)
+            await new Promise(r => setTimeout(r, 200));
+            console.log('[BLE] Streaming started, notifications active');
+
             // Start periodic backend upload (every 1 second)
             if (backendTimerRef.current) {
                 clearInterval(backendTimerRef.current);
@@ -298,15 +303,25 @@ export function useBLE(): UseBLEResult {
     const calibrateSensor = useCallback(async () => {
         try {
             setError(null);
-            // 1. Reset Hardware first
+            console.log('[CALIBRATE] Step 1: Requesting IMU Hardware Reset...');
             await bleService.resetIMU();
-            // 2. Wait a bit for hardware to settle
-            await new Promise(r => setTimeout(r, 500));
-            // 3. Start Software Calibration (2s)
+
+            // Wait for hardware to reboot and stabilize
+            await new Promise(r => setTimeout(r, 800));
+
+            console.log('[CALIBRATE] Step 2: Starting stream for calibration data...');
+            await bleService.startStreaming();
+
+            // Allow a small window for the first packets to arrive
+            await new Promise(r => setTimeout(r, 200));
+
+            console.log('[CALIBRATE] Step 3: Starting Software Bias Calculation (2s)...');
             await trajectoryService.calibrateAsync(2000);
+
             Alert.alert('Calibration Complete', 'Sensor bias calculated and orientation reset.');
         } catch (err: any) {
             setError(err.message);
+            console.error('[CALIBRATE] Error during calibration:', err);
         }
     }, [bleService]);
 

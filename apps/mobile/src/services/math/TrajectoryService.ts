@@ -25,6 +25,7 @@ export interface TrajectoryPoint {
     timestamp: number;
     position: Vec3;
     rotation: Quaternion;
+    relativePosition: Vec3;
 }
 
 export class TrajectoryService {
@@ -73,6 +74,11 @@ export class TrajectoryService {
     private calibrationBuffer: IMUSample[] = [];
     private lastTimestamp = 0;
     private path: TrajectoryPoint[] = [];
+    private isOrientationInitialized = false;
+
+    // Repetition tracking
+    private wasMoving = false;
+    private baselineP: Vec3 = { x: 0, y: 0, z: 0 };
 
     // Snapshot
     private liftSnapshot: TrajectoryPoint[] = [];
@@ -81,25 +87,65 @@ export class TrajectoryService {
         this.reset();
     }
 
+    /**
+     * FULL RESET: Resets everything including biases
+     * Use this only when starting a completely new session
+     */
     reset() {
-        console.log('[ESKF] Resetting state...');
+        console.log('[ESKF] Full Reset (including biases)...');
         this.p = Vec3Math.zero();
         this.v = Vec3Math.zero();
         this.q = QuatMath.identity();
-        // Keep biases if already calibrated? For now, reset biases to last known valid calibration or zero
-        // this.ab = Vec3Math.zero(); // Optional: keep calibrated bias?
-        // this.gb = Vec3Math.zero();
+        this.ab = Vec3Math.zero();
+        this.gb = Vec3Math.zero();
 
         // Initialize P with small uncertainty
         this.P.fill(0);
         for (let i = 0; i < 15; i++) {
-            this.P[i * 15 + i] = 0.01; // Initial uncertainty
+            this.P[i * 15 + i] = 0.01;
         }
 
         this.path = [];
         this.lastTimestamp = 0;
         this.accelBuffer = [];
         this.gyroBuffer = [];
+        this.wasMoving = false;
+        this.baselineP = { x: 0, y: 0, z: 0 };
+        this.isOrientationInitialized = false;
+    }
+
+    /**
+     * KINEMATIC RESET ("NEW REP" / "TARE")
+     * Resets position, velocity, and path for a new lift
+     * KEEPS the calibrated biases (ab, gb) - no need to recalibrate!
+     * Use this between reps during a training session
+     */
+    resetKinematics() {
+        console.log('[ESKF] Kinematic Reset (keeping calibrated biases)...');
+
+        // Reset kinematics
+        this.p = Vec3Math.zero();
+        this.v = Vec3Math.zero();
+
+        // Reset orientation (will re-align on next packet via Hot Start)
+        this.q = QuatMath.identity();
+        this.isOrientationInitialized = false;
+
+        // Reset covariance
+        this.P.fill(0);
+        for (let i = 0; i < 15; i++) {
+            this.P[i * 15 + i] = 0.01;
+        }
+
+        // Clear path and buffers
+        this.path = [];
+        this.accelBuffer = [];
+        this.gyroBuffer = [];
+        this.wasMoving = false;
+        this.baselineP = { x: 0, y: 0, z: 0 };
+
+        // NOTE: We do NOT reset ab and gb - those are calibrated values!
+        console.log('[ESKF] Ready for new rep (biases preserved)');
     }
 
     // --- Main Loop ---
@@ -110,12 +156,28 @@ export class TrajectoryService {
         // Calibration Mode
         if (this.isCalibrating) {
             this.calibrationBuffer.push(sample);
-            return { timestamp: t, position: Vec3Math.zero(), rotation: QuatMath.identity() };
+            return {
+                timestamp: t,
+                position: Vec3Math.zero(),
+                rotation: QuatMath.identity(),
+                relativePosition: Vec3Math.zero()
+            };
         }
 
+        // --- CORRECCIÓN: Manejo del Primer Paquete ---
         if (this.lastTimestamp === 0) {
             this.lastTimestamp = t;
-            return { timestamp: t, position: this.p, rotation: this.q };
+            // Hot Start instantáneo
+            const a_init = { x: sample.ax * 9.81, y: sample.ay * 9.81, z: sample.az * 9.81 };
+            this.q = this.getRotationFromGravity(a_init.x, a_init.y, a_init.z);
+            this.isOrientationInitialized = true;
+            console.log('[ESKF] First packet: Orientation aligned to gravity.');
+            return {
+                timestamp: t,
+                position: { ...this.p },
+                rotation: { ...this.q },
+                relativePosition: Vec3Math.zero()
+            };
         }
 
         const dt = (t - this.lastTimestamp) / 1000.0;
@@ -123,8 +185,6 @@ export class TrajectoryService {
         this.lastTimestamp = t;
 
         // 1. Unpack Raw Measurements
-        // Assume sample already scaled by decoder? Yes (g and dps) => Wait, decoder uses 'g' and 'dps'
-        // We need m/s^2 and rad/s
         const a_meas: Vec3 = {
             x: sample.ax * 9.81,
             y: sample.ay * 9.81,
@@ -145,18 +205,40 @@ export class TrajectoryService {
         if (isStat) {
             this.applyZUPT();
             this.applyGravityAlignment(a_meas);
+
+            if (this.wasMoving) {
+                console.log('[REP] Finished movement. Baseline P will be updated on next move.');
+                this.wasMoving = false;
+            }
+        } else {
+            if (!this.wasMoving) {
+                console.log('[REP] Started movement. Setting current P as baseline for this rep.');
+                this.baselineP = { ...this.p };
+                this.wasMoving = true;
+            }
         }
+
+        // Detección de fallo catastrófico (NaN o explosión de metros)
+        if (isNaN(this.p.x) || isNaN(this.p.z) || Math.abs(this.p.z) > 1000) {
+            console.warn("[ESKF] State exploded or became NaN! Emergency Reset.");
+            this.reset();
+            return this.getLastPoint();
+        }
+
+        // Relative position = current - baseline
+        const relP = Vec3Math.sub(this.p, this.baselineP);
 
         // Debug Logs (every 50 samples ~ 0.5s)
         if (this.path.length % 50 === 0) {
-            console.log(`[ESKF] t:${t / 1000} P:[${this.p.x.toFixed(3)},${this.p.y.toFixed(3)},${this.p.z.toFixed(3)}] V:[${this.v.x.toFixed(3)},${this.v.y.toFixed(3)},${this.v.z.toFixed(3)}] ZUPT:${isStat}`);
+            console.log(`[ESKF] t:${t / 1000} P:[${this.p.x.toFixed(3)},${this.p.z.toFixed(3)}] V:${this.v.z.toFixed(3)} m/s ZUPT:${isStat}`);
         }
 
         // 4. Save and Return Point
         const point: TrajectoryPoint = {
             timestamp: t,
             position: { ...this.p },
-            rotation: { ...this.q }
+            rotation: { ...this.q },
+            relativePosition: relP
         };
         this.path.push(point);
         return point;
@@ -236,6 +318,12 @@ export class TrajectoryService {
             (this.NOISE_ACC_BIAS ** 2) * dt, (this.NOISE_ACC_BIAS ** 2) * dt, (this.NOISE_ACC_BIAS ** 2) * dt,
             (this.NOISE_GYR_BIAS ** 2) * dt, (this.NOISE_GYR_BIAS ** 2) * dt, (this.NOISE_GYR_BIAS ** 2) * dt
         ]);
+
+        // Clamp Covariance to prevent explosion
+        for (let i = 0; i < 225; i++) {
+            if (P_pred.data[i] > 1000) P_pred.data[i] = 1000;
+            if (P_pred.data[i] < -1000) P_pred.data[i] = -1000;
+        }
 
         // Save back to Float64Array
         this.P.set(P_pred.data);
@@ -507,17 +595,34 @@ export class TrajectoryService {
         if (this.gyroBuffer.length > this.BUFFER_SIZE) this.gyroBuffer.shift();
     }
 
-    private isStationary(): boolean {
+    /**
+     * Check if sensor is stationary using robust ZUPT detection
+     * Uses gyro quietness, accel near 1g, and low variance
+     * PUBLIC: Used by UI for lift start/stop detection
+     */
+    public isStationary(): boolean {
         if (this.accelBuffer.length < this.BUFFER_SIZE) return false;
 
+        // 1. Calcular Media
         const avgA = this.accelBuffer.reduce((s, v) => s + v, 0) / this.accelBuffer.length;
         const avgW = this.gyroBuffer.reduce((s, v) => s + v, 0) / this.gyroBuffer.length;
 
-        // Check 1: Gyro Low
-        if (avgW > this.REST_GYRO_THR) return false;
+        // 2. Calcular Varianza (Qué tan inestable es la señal)
+        const varA = this.accelBuffer.reduce((s, v) => s + (v - avgA) ** 2, 0) / this.accelBuffer.length;
 
-        // Check 2: Accel near gravity (9.81)
-        if (Math.abs(avgA - this.GRAVITY_MAG) > (this.REST_ACCEL_THR * 9.81)) return false;
+        // UMBRALES RECOMENDADOS PARA PESAS
+        const ACCEL_MEAN_TOLERANCE = 0.3; // m/s^2 (aprox 0.03g deviation from gravity)
+        const ACCEL_VAR_TOLERANCE = 0.05; // m/s^2 variance (muy estable)
+        const GYRO_MEAN_TOLERANCE = 0.05; // rad/s (aprox 3 deg/s)
+
+        // Check 1: Gyroscope quietness (Rotation kills position accuracy)
+        if (avgW > GYRO_MEAN_TOLERANCE) return false;
+
+        // Check 2: Acceleration Magnitude close to Gravity
+        if (Math.abs(avgA - this.GRAVITY_MAG) > ACCEL_MEAN_TOLERANCE) return false;
+
+        // Check 3: Acceleration Variance (Vibration check)
+        if (varA > ACCEL_VAR_TOLERANCE) return false;
 
         return true;
     }
@@ -556,16 +661,28 @@ export class TrajectoryService {
         return QuatMath.normalize({ w, x, y, z });
     }
 
-    async calibrateAsync(durationMs: number = 2000) {
-        console.log('[ESKF] Starting Calibration...');
+    async calibrateAsync(durationMs: number = 5000) {
+        console.log('[ESKF] ========================================');
+        console.log('[ESKF] STARTING RIGOROUS STATIC CALIBRATION');
+        console.log(`[ESKF] Duration: ${durationMs}ms`);
+        console.log('[ESKF] Keep the sensor COMPLETELY STILL!');
+        console.log('[ESKF] ========================================');
+
         this.isCalibrating = true;
         this.calibrationBuffer = [];
         await new Promise(r => setTimeout(r, durationMs));
         this.isCalibrating = false;
 
-        if (this.calibrationBuffer.length < 10) return;
+        const MIN_SAMPLES = 500; // Reduced from 3000 - sufficient for BLE streaming
+        if (this.calibrationBuffer.length < MIN_SAMPLES) {
+            console.error(`[ESKF] ❌ Calibration FAILED: Only ${this.calibrationBuffer.length}/${MIN_SAMPLES} samples received.`);
+            console.error('[ESKF] Is the sensor streaming at ~1kHz?');
+            return;
+        }
 
-        // --- 1. Cálculo de Biases ---
+        console.log(`[ESKF] ✓ Received ${this.calibrationBuffer.length} samples. Processing...`);
+
+        // --- 1. Cálculo de Promedios Crudos ---
         let sumGx = 0, sumGy = 0, sumGz = 0;
         let sumAx = 0, sumAy = 0, sumAz = 0;
 
@@ -578,44 +695,214 @@ export class TrajectoryService {
         const radFactor = Math.PI / 180;
         const gFactor = 9.81;
 
-        // Sesgo del giroscopio (en rad/s)
+        // Promedios en unidades crudas (g y dps)
+        const avgGx_dps = sumGx / count;
+        const avgGy_dps = sumGy / count;
+        const avgGz_dps = sumGz / count;
+
+        const avgAx_g = sumAx / count;
+        const avgAy_g = sumAy / count;
+        const avgAz_g = sumAz / count;
+
+        // --- 2. Sesgo del Giroscopio (Directo) ---
         this.gb = {
-            x: (sumGx / count) * radFactor,
-            y: (sumGy / count) * radFactor,
-            z: (sumGz / count) * radFactor
+            x: avgGx_dps * radFactor,
+            y: avgGy_dps * radFactor,
+            z: avgGz_dps * radFactor
         };
 
-        // Sesgo del acelerómetro: Lo dejamos en 0 (asumimos calibración de fábrica)
-        this.ab = { x: 0, y: 0, z: 0 };
+        console.log('[ESKF] Gyro Bias (rad/s):');
+        console.log(`[ESKF]   X: ${this.gb.x.toFixed(6)} (${avgGx_dps.toFixed(3)} dps)`);
+        console.log(`[ESKF]   Y: ${this.gb.y.toFixed(6)} (${avgGy_dps.toFixed(3)} dps)`);
+        console.log(`[ESKF]   Z: ${this.gb.z.toFixed(6)} (${avgGz_dps.toFixed(3)} dps)`);
 
-        // --- 2. Orientación Inicial ---
-        const avgAx = (sumAx / count) * gFactor;
-        const avgAy = (sumAy / count) * gFactor;
-        const avgAz = (sumAz / count) * gFactor;
+        // --- 3. Orientación Inicial (Necesaria para calcular bias del acelerómetro) ---
+        const avgAx = avgAx_g * gFactor;
+        const avgAy = avgAy_g * gFactor;
+        const avgAz = avgAz_g * gFactor;
+
+        // CRITICAL: Log raw accelerometer to identify gravity axis
+        console.log('[ESKF] ========================================');
+        console.log('[ESKF] RAW ACCELEROMETER (identify gravity axis):');
+        console.log(`[ESKF]   X: ${avgAx_g.toFixed(3)} g  (${avgAx.toFixed(2)} m/s²)`);
+        console.log(`[ESKF]   Y: ${avgAy_g.toFixed(3)} g  (${avgAy.toFixed(2)} m/s²)`);
+        console.log(`[ESKF]   Z: ${avgAz_g.toFixed(3)} g  (${avgAz.toFixed(2)} m/s²)`);
+        console.log('[ESKF] → The axis closest to ±1.0g is your gravity axis');
+        console.log('[ESKF] ========================================');
 
         // Calculamos la rotación inicial basada en la gravedad
         const initialQ = this.getRotationFromGravity(avgAx, avgAy, avgAz);
 
-        console.log(`[ESKF] Calibrated. Gravity Detect: [${avgAx.toFixed(2)}, ${avgAy.toFixed(2)}, ${avgAz.toFixed(2)}]`);
-        console.log(`[ESKF] Initial Q calculated: [${initialQ.w.toFixed(3)}, ${initialQ.x.toFixed(3)}, ${initialQ.y.toFixed(3)}, ${initialQ.z.toFixed(3)}]`);
+        console.log('[ESKF] Detected Gravity Direction (m/s²):');
+        console.log(`[ESKF]   [${avgAx.toFixed(3)}, ${avgAy.toFixed(3)}, ${avgAz.toFixed(3)}]`);
+        console.log('[ESKF] Initial Orientation (Quaternion):');
+        console.log(`[ESKF]   [w:${initialQ.w.toFixed(4)}, x:${initialQ.x.toFixed(4)}, y:${initialQ.y.toFixed(4)}, z:${initialQ.z.toFixed(4)}]`);
 
-        // --- 3. Reinicio del Estado ---
+        // --- 4. Sesgo del Acelerómetro (CRÍTICO) ---
+        // La lectura promedio del acelerómetro en reposo debería ser SOLO gravedad.
+        // Cualquier desviación de [0, 0, g] en el marco global es un bias.
+
+        // Convertimos la lectura promedio al marco global usando la orientación inicial
+        const R_init = QuatMath.toRotationMatrix(initialQ);
+        const a_measured_global = R_init.multiplyVec({ x: avgAx, y: avgAy, z: avgAz });
+
+        // En el marco global, esperamos [0, 0, 9.81]
+        // El error es lo que medimos menos lo esperado
+        const a_bias_global = {
+            x: a_measured_global.x - 0,
+            y: a_measured_global.y - 0,
+            z: a_measured_global.z - this.GRAVITY_MAG
+        };
+
+        // Convertimos el bias de vuelta al marco del sensor (body frame)
+        // porque el ESKF lo necesita en coordenadas del sensor
+        const R_init_T = R_init.transpose();
+        this.ab = R_init_T.multiplyVec(a_bias_global);
+
+        console.log('[ESKF] Accel Bias (m/s²) [Body Frame]:');
+        console.log(`[ESKF]   X: ${this.ab.x.toFixed(6)} (${(this.ab.x / 9.81).toFixed(5)} g)`);
+        console.log(`[ESKF]   Y: ${this.ab.y.toFixed(6)} (${(this.ab.y / 9.81).toFixed(5)} g)`);
+        console.log(`[ESKF]   Z: ${this.ab.z.toFixed(6)} (${(this.ab.z / 9.81).toFixed(5)} g)`);
+
+        // --- 5. Validación de Calidad ---
+        const bias_magnitude = Math.sqrt(this.ab.x ** 2 + this.ab.y ** 2 + this.ab.z ** 2);
+        const gyro_magnitude = Math.sqrt(this.gb.x ** 2 + this.gb.y ** 2 + this.gb.z ** 2);
+
+        console.log('[ESKF] Calibration Quality Check:');
+        console.log(`[ESKF]   Accel Bias Magnitude: ${bias_magnitude.toFixed(4)} m/s² (${(bias_magnitude / 9.81 * 100).toFixed(2)}% of g)`);
+        console.log(`[ESKF]   Gyro Bias Magnitude: ${(gyro_magnitude * 180 / Math.PI).toFixed(3)} dps`);
+
+        if (bias_magnitude > 0.5) {
+            console.warn('[ESKF] ⚠️  WARNING: Accel bias is unusually high (>0.5 m/s²).');
+            console.warn('[ESKF] Was the sensor moving during calibration?');
+        }
+
+        if (gyro_magnitude > 0.1) {
+            console.warn('[ESKF] ⚠️  WARNING: Gyro bias is high (>5.7 dps).');
+            console.warn('[ESKF] Sensor may need factory recalibration.');
+        }
+
+        // --- 6. Reinicio del Estado ---
         this.reset();
 
         // Asignamos la orientación inicial calculada
         this.q = initialQ;
+        this.isOrientationInitialized = true;
 
-        // P es reiniciado en reset(), pero los biases (ab, gb) se mantienen porque no se limpian allí.
+        console.log('[ESKF] ========================================');
+        console.log('[ESKF] ✅ CALIBRATION COMPLETE');
+        console.log('[ESKF] System ready for accurate tracking.');
+        console.log('[ESKF] ========================================');
+    }
+
+    // --- Drift Correction (Post-Processing) ---
+
+    /**
+     * Apply drift correction to a trajectory path.
+     * Distributes the final velocity error linearly across all points.
+     * This ensures the path starts and ends at zero velocity.
+     */
+    private applyDriftCorrection(path: TrajectoryPoint[]): TrajectoryPoint[] {
+        if (path.length < 2) return path;
+
+        // 1. Get the velocity at the end of the movement
+        // (Should be zero, but drift causes it to be non-zero)
+        const finalVelocityError = { ...this.v };
+
+        // 2. Calculate total duration
+        const t0 = path[0].timestamp;
+        const tN = path[path.length - 1].timestamp;
+        const duration = (tN - t0) / 1000; // seconds
+
+        if (duration === 0) return path;
+
+        console.log(`[DRIFT] Correcting path with ${path.length} points`);
+        console.log(`[DRIFT] Final velocity error: [${finalVelocityError.x.toFixed(3)}, ${finalVelocityError.y.toFixed(3)}, ${finalVelocityError.z.toFixed(3)}] m/s`);
+
+        // 3. Distribute error linearly across all points
+        const correctedPath = path.map((point, i) => {
+            const t = (point.timestamp - t0) / 1000; // Time since start
+            const ratio = t / duration; // 0 to 1
+
+            // Position correction (integrate velocity correction)
+            // p_correction = -0.5 * v_error * t * ratio
+            const p_correction = {
+                x: -0.5 * finalVelocityError.x * t * ratio,
+                y: -0.5 * finalVelocityError.y * t * ratio,
+                z: -0.5 * finalVelocityError.z * t * ratio
+            };
+
+            return {
+                ...point,
+                relativePosition: {
+                    x: point.relativePosition.x + p_correction.x,
+                    y: point.relativePosition.y + p_correction.y,
+                    z: point.relativePosition.z + p_correction.z
+                }
+            };
+        });
+
+        console.log(`[DRIFT] Correction applied successfully`);
+        return correctedPath;
+    }
+
+    /**
+     * Calculate statistics for a lift (max height, max velocity, duration)
+     */
+    getLiftStatistics(path: TrajectoryPoint[]) {
+        if (path.length === 0) {
+            return {
+                maxHeight: 0,
+                maxVelocity: 0,
+                duration: 0,
+                pointCount: 0
+            };
+        }
+
+        let maxHeight = 0;
+        let maxVelocity = 0;
+
+        for (const point of path) {
+            const height = point.relativePosition.z;
+            if (height > maxHeight) maxHeight = height;
+
+            // Approximate velocity from position derivative (not stored in point)
+            // For now, we'll use the service's current velocity as max
+        }
+
+        // Get max velocity from the entire path (we'd need to store velocity in points for accuracy)
+        // For MVP, we'll track it separately or estimate
+        maxVelocity = Math.sqrt(this.v.x ** 2 + this.v.y ** 2 + this.v.z ** 2);
+
+        const duration = (path[path.length - 1].timestamp - path[0].timestamp) / 1000;
+
+        return {
+            maxHeight,
+            maxVelocity,
+            duration,
+            pointCount: path.length
+        };
     }
 
     // Snapshot API
-    createSnapshot() { this.liftSnapshot = [...this.path]; }
+    createSnapshot() {
+        // Apply drift correction before saving snapshot
+        const rawPath = [...this.path];
+        this.liftSnapshot = this.applyDriftCorrection(rawPath);
+        console.log('[SNAPSHOT] Created with drift correction applied');
+    }
+
     getLiftSnapshot() { return this.liftSnapshot; }
     hasLiftSnapshot() { return this.liftSnapshot.length > 0; }
     clearLiftSnapshot() { this.liftSnapshot = []; }
 
     private getLastPoint(): TrajectoryPoint {
-        return this.path.length > 0 ? this.path[this.path.length - 1] : { timestamp: 0, position: Vec3Math.zero(), rotation: QuatMath.identity() };
+        return this.path.length > 0 ? this.path[this.path.length - 1] : {
+            timestamp: 0,
+            position: Vec3Math.zero(),
+            rotation: QuatMath.identity(),
+            relativePosition: Vec3Math.zero()
+        };
     }
 }
 
