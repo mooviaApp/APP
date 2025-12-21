@@ -15,25 +15,31 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
     const [liftState, setLiftState] = useState<LiftState>('IDLE');
     const [snapshotPath, setSnapshotPath] = useState<any[]>([]);
 
-    // Use robust ZUPT-based detection instead of simple velocity threshold
-    const isStationary = trajectoryService.isStationary();
-    const isMoving = !isStationary;
+    // Use robust ground detection (ZUPT + height check)
+    const isOnGround = trajectoryService.isOnGround();
+    const isMoving = !trajectoryService.isStationary();
 
-    // State machine: IDLE → LIFTING → RESULT
+    // State machine: IDLE → LIFTING → RESULT → (auto back to LIFTING on movement)
     useEffect(() => {
         if (liftState === 'IDLE' && isMoving) {
             setLiftState('LIFTING');
             console.log('[UI] State: IDLE → LIFTING');
         }
-        else if (liftState === 'LIFTING' && !isMoving) {
-            // Movement stopped → Save snapshot and show result
+        else if (liftState === 'LIFTING' && isOnGround) {
+            // Barbell returned to ground → Save snapshot and show result
             trajectoryService.createSnapshot();
             const correctedPath = trajectoryService.getLiftSnapshot();
             setSnapshotPath(correctedPath);
             setLiftState('RESULT');
-            console.log('[UI] State: LIFTING → RESULT');
+            console.log('[UI] State: LIFTING → RESULT (barbell on ground)');
         }
-    }, [isMoving, liftState]);
+        else if (liftState === 'RESULT' && isMoving) {
+            // New movement detected → Reset and start new lift
+            trajectoryService.resetKinematics();
+            setLiftState('LIFTING');
+            console.log('[UI] State: RESULT → LIFTING (auto-reset)');
+        }
+    }, [isMoving, isOnGround, liftState]);
 
     if (!data) {
         return (
@@ -95,16 +101,7 @@ export function SensorDataCard({ data }: SensorDataCardProps) {
 
         return (
             <View style={styles.container}>
-                <View style={styles.headerRow}>
-                    <Text style={styles.title}>Lift Complete</Text>
-                    <TouchableOpacity onPress={() => {
-                        trajectoryService.resetKinematics();
-                        setLiftState('IDLE');
-                        console.log('[UI] State: RESULT → IDLE');
-                    }}>
-                        <Text style={styles.newRepButton}>🔄 NEW REP</Text>
-                    </TouchableOpacity>
-                </View>
+                <Text style={styles.title}>Lift Complete ✅</Text>
 
                 <View style={styles.statsRow}>
                     <View style={styles.statBox}>

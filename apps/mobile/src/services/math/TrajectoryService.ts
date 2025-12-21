@@ -627,6 +627,19 @@ export class TrajectoryService {
         return true;
     }
 
+    /**
+     * Check if barbell is on the ground
+     * Combines ZUPT (stationary) with height check to distinguish:
+     * - Barbell on ground: quiet + height ~0m ✅
+     * - Barbell held still in air: quiet + height >0.15m ❌
+     * - Peak of lift (v=0 momentarily): not quiet OR height >0.15m ❌
+     */
+    public isOnGround(): boolean {
+        const isQuiet = this.isStationary();
+        const heightNearZero = Math.abs(this.p.z) < 0.15;  // < 15cm threshold
+        return isQuiet && heightNearZero;
+    }
+
     // --- Public API ---
 
     getPath() { return this.path; }
