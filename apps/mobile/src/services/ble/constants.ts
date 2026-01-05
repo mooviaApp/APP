@@ -95,6 +95,9 @@ export const SENSOR_CONFIG = {
 
     /** Total samples in a batch for backend */
     BATCH_SIZE_SAMPLES: 60, // 4 packets × 15 samples
+
+    /** Timestamp tick duration in microseconds (ICM-42688-P: 32/30 us per tick) */
+    TIMESTAMP_TICK_US: 32.0 / 30.0,
 } as const;
 
 // ============================================================================

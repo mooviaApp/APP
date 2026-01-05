@@ -181,8 +181,15 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
             let deltaTicks = (next.hwTs - curr.hwTs);
             if (deltaTicks < 0) deltaTicks += 65536;
 
+            // Convert to ms using V3 scaling factor
+            // deltaMs = ticks * (32/30 ns/tick) / 1000 us/ms ... wait.
+            // SENSOR_CONFIG.TIMESTAMP_TICK_US is in MICROSECONDS.
+            // So deltaTicks * tick_us = total_us.
+            // total_us / 1000 = total_ms.
+            const deltaMs = (deltaTicks * SENSOR_CONFIG.TIMESTAMP_TICK_US) / 1000.0;
+
             // Compute time: next - delta
-            const currTime = nextTime - (deltaTicks * SENSOR_CONFIG.SAMPLE_INTERVAL_MS);
+            const currTime = nextTime - deltaMs;
 
             samples[i] = {
                 timestamp: new Date(currTime).toISOString(),
