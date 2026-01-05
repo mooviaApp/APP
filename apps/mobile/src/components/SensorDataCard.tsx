@@ -1,160 +1,74 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Dimensions, TouchableOpacity } from 'react-native';
-import Svg, { Line, Circle, Polyline } from 'react-native-svg';
+import { View, Text, StyleSheet } from 'react-native';
 import { IMUSample } from '../services/ble/constants';
-import { trajectoryService } from '../services/math/TrajectoryService';
+import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
 import { OrientationViz } from './OrientationViz';
+import { TrajectoryGraph } from './TrajectoryGraph';
 
 interface SensorDataCardProps {
     data: IMUSample | null;
+    isCalibrating: boolean;
+    trajectoryPath?: TrajectoryPoint[];
 }
 
-type LiftState = 'IDLE' | 'LIFTING' | 'RESULT';
+// SIMPLIFIED: Only IDLE and CALIBRATING states for calibration testing
+type LiftState = 'IDLE' | 'CALIBRATING';
 
-export function SensorDataCard({ data }: SensorDataCardProps) {
+export function SensorDataCard({ data, isCalibrating: isCalibratingProp, trajectoryPath }: SensorDataCardProps) {
     const [liftState, setLiftState] = useState<LiftState>('IDLE');
-    const [snapshotPath, setSnapshotPath] = useState<any[]>([]);
 
-    // Use robust ground detection (ZUPT + height check)
-    const isOnGround = trajectoryService.isOnGround();
-    const isMoving = !trajectoryService.isStationary();
-
-    // State machine: IDLE → LIFTING → RESULT → (auto back to LIFTING on movement)
+    // SIMPLIFIED State machine: IDLE ↔ CALIBRATING only
     useEffect(() => {
-        if (liftState === 'IDLE' && isMoving) {
-            setLiftState('LIFTING');
-            console.log('[UI] State: IDLE → LIFTING');
+
+        if (isCalibratingProp && liftState !== 'CALIBRATING') {
+            setLiftState('CALIBRATING');
+            console.log('[UI] State: → CALIBRATING');
         }
-        else if (liftState === 'LIFTING' && isOnGround) {
-            // Barbell returned to ground → Save snapshot and show result
-            trajectoryService.createSnapshot();
-            const correctedPath = trajectoryService.getLiftSnapshot();
-            setSnapshotPath(correctedPath);
-            setLiftState('RESULT');
-            console.log('[UI] State: LIFTING → RESULT (barbell on ground)');
+        else if (!isCalibratingProp && liftState === 'CALIBRATING') {
+            setLiftState('IDLE');
+            console.log('[UI] State: CALIBRATING → IDLE');
         }
-        else if (liftState === 'RESULT' && isMoving) {
-            // New movement detected → Reset and start new lift
-            trajectoryService.resetKinematics();
-            setLiftState('LIFTING');
-            console.log('[UI] State: RESULT → LIFTING (auto-reset)');
-        }
-    }, [isMoving, isOnGround, liftState]);
+    }, [liftState, isCalibratingProp]);
 
     if (!data) {
         return (
             <View style={styles.container}>
                 <Text style={styles.noDataText}>No sensor data available</Text>
-                <Text style={styles.hintText}>Start streaming to see real-time data</Text>
+                <Text style={styles.hintText}>Press "Stream On" to start</Text>
             </View>
         );
     }
 
-    // --- STATE: LIFTING (Only numbers, no graph) ---
-    if (liftState === 'LIFTING') {
-        const path = trajectoryService.getPath();
-        const currentPoint = path.length > 0 ? path[path.length - 1] : null;
-        const height = currentPoint?.relativePosition.z || 0;
-        const velocity = trajectoryService.getVelocity();
+    const isCalibrating = liftState === 'CALIBRATING';
 
-        return (
-            <View style={[styles.container, styles.liftingContainer]}>
-                <Text style={styles.liftingTitle}>⚡ RECORDING LIFT</Text>
-
-                <View style={styles.bigMetric}>
-                    <Text style={styles.metricLabel}>HEIGHT</Text>
-                    <Text style={styles.metricValue}>{height.toFixed(2)}</Text>
-                    <Text style={styles.metricUnit}>meters</Text>
-                </View>
-
-                <View style={styles.bigMetric}>
-                    <Text style={styles.metricLabel}>VELOCITY</Text>
-                    <Text style={styles.metricValue}>{velocity.z.toFixed(2)}</Text>
-                    <Text style={styles.metricUnit}>m/s</Text>
-                </View>
-            </View>
-        );
-    }
-
-    // --- STATE: RESULT (Show graph) ---
-    if (liftState === 'RESULT') {
-        const screenWidth = Dimensions.get('window').width;
-        const GRAPH_SIZE = screenWidth - 60;
-        const SCALE = 200;
-        const CENTER_X = GRAPH_SIZE / 2;
-        const CENTER_Y = GRAPH_SIZE;
-
-        const toScreen = (relP: { x: number, y: number, z: number }) => {
-            return {
-                x: CENTER_X + (relP.x * SCALE),
-                y: CENTER_Y - (relP.z * SCALE)
-            };
-        };
-
-        const polylinePoints = snapshotPath.map(p => {
-            const s = toScreen(p.relativePosition);
-            return `${s.x},${s.y}`;
-        }).join(' ');
-
-        // Calculate max height
-        const maxHeight = Math.max(...snapshotPath.map(p => p.relativePosition.z), 0);
-
-        return (
-            <View style={styles.container}>
-                <Text style={styles.title}>Lift Complete ✅</Text>
-
-                <View style={styles.statsRow}>
-                    <View style={styles.statBox}>
-                        <Text style={styles.statLabel}>Max Height</Text>
-                        <Text style={styles.statValue}>{maxHeight.toFixed(2)} m</Text>
-                    </View>
-                    <View style={styles.statBox}>
-                        <Text style={styles.statLabel}>Points</Text>
-                        <Text style={styles.statValue}>{snapshotPath.length}</Text>
-                    </View>
-                </View>
-
-                <View style={styles.graphContainer}>
-                    <Svg height={GRAPH_SIZE} width={GRAPH_SIZE}>
-                        <Line x1="0" y1={CENTER_Y} x2={GRAPH_SIZE} y2={CENTER_Y} stroke="#666" strokeWidth="2" />
-                        <Line x1={CENTER_X} y1="0" x2={CENTER_X} y2={GRAPH_SIZE} stroke="#444" strokeWidth="1" strokeDasharray="5,5" />
-
-                        {polylinePoints && (
-                            <Polyline
-                                points={polylinePoints}
-                                fill="none"
-                                stroke="#1DF09F"
-                                strokeWidth="4"
-                            />
-                        )}
-
-                        <Circle cx={CENTER_X} cy={CENTER_Y} r="6" fill="white" stroke="#1DF09F" strokeWidth="2" />
-                    </Svg>
-                </View>
-
-                <Text style={styles.hintText}>Tap NEW REP to start again</Text>
-            </View>
-        );
-    }
-
-    // --- STATE: IDLE (Waiting) ---
     return (
         <View style={styles.container}>
-            <Text style={styles.title}>Ready to Lift</Text>
-            <Text style={styles.hintText}>Start your movement when ready</Text>
+            <View style={styles.headerRow}>
+                <Text style={styles.title}>
+                    {isCalibrating ? '⚙️ CALIBRATING...' : '🔧 Sensor Monitor'}
+                </Text>
+            </View>
 
-            <TouchableOpacity
-                style={styles.calibrateButton}
-                onPress={() => {
-                    trajectoryService.calibrateAsync(5000);
-                    console.log('[UI] User pressed CALIBRATE');
-                }}
-            >
-                <Text style={styles.calibrateButtonText}>⚙️ CALIBRATE SENSOR</Text>
-                <Text style={styles.calibrateHint}>Place sensor still for 5 seconds</Text>
-            </TouchableOpacity>
+            <Text style={styles.hintText}>
+                {isCalibrating ? 'Stay perfectly still while we calculate sensor biases' : 'Sensor streaming and calibrated'}
+            </Text>
 
-            <OrientationViz q={trajectoryService.getOrientation()} />
+            {/* Show orientation visualization when not calibrating */}
+            {!isCalibrating && (
+                <View style={styles.vizWrapper}>
+                    <OrientationViz q={trajectoryService.getOrientation()} />
+                </View>
+            )}
+
+            {/* Raw sensor data display for debugging */}
+            <View style={styles.rawDataContainer}>
+                <Text style={styles.rawDataTitle}>Raw Sensor Data</Text>
+                <Text style={styles.rawDataText}>Accel: [{data.ax.toFixed(3)}, {data.ay.toFixed(3)}, {data.az.toFixed(3)}] g</Text>
+                <Text style={styles.rawDataText}>Gyro: [{data.gx.toFixed(1)}, {data.gy.toFixed(1)}, {data.gz.toFixed(1)}] dps</Text>
+            </View>
+
+            {/* Trajectory Graph (Post-Processed) */}
+            <TrajectoryGraph path={trajectoryPath ?? trajectoryService.getPath()} />
         </View>
     );
 }
@@ -267,27 +181,65 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: '#707080',
         textAlign: 'center',
-        marginTop: 10
+        marginTop: 10,
+        marginBottom: 20
     },
-    calibrateButton: {
-        backgroundColor: '#333',
-        paddingVertical: 20,
-        paddingHorizontal: 30,
+    controlBar: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        gap: 12,
+        marginBottom: 20
+    },
+    miniButton: {
+        flex: 1,
+        paddingVertical: 15,
         borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
         borderWidth: 1,
-        borderColor: '#555',
-        marginVertical: 20,
+    },
+    taraButton: {
+        backgroundColor: '#252535',
+        borderColor: '#4ECDC4',
+    },
+    calibButton: {
+        backgroundColor: '#252535',
+        borderColor: '#FF6B35',
+    },
+    miniButtonText: {
+        color: '#FFF',
+        fontWeight: '800',
+        fontSize: 13,
+        letterSpacing: 1
+    },
+    newRepButtonText: {
+        color: '#1DF09F',
+        fontWeight: 'bold',
+        fontSize: 14
+    },
+    vizWrapper: {
+        marginTop: 10,
         alignItems: 'center'
     },
-    calibrateButtonText: {
-        color: '#FFF',
-        fontWeight: '700',
-        fontSize: 16,
-        marginBottom: 4
+    rawDataContainer: {
+        marginTop: 20,
+        padding: 15,
+        backgroundColor: '#252535',
+        borderRadius: 12,
+        borderColor: '#333',
+        borderWidth: 1
     },
-    calibrateHint: {
-        color: '#888',
+    rawDataTitle: {
+        color: '#1DF09F',
+        fontSize: 14,
+        fontWeight: '700',
+        marginBottom: 10,
+        letterSpacing: 1
+    },
+    rawDataText: {
+        color: '#FFF',
         fontSize: 12,
-        fontWeight: '500'
+        fontFamily: 'monospace',
+        marginBottom: 5
     }
 });

@@ -243,8 +243,8 @@ export class BLEService {
 
                 console.log(`[BLE] ✅ MTU negotiated: ${negotiatedMTU} bytes`);
 
-                if (negotiatedMTU < 185) {
-                    const errorMsg = `CRITICAL: MTU ${negotiatedMTU} < 185. Cannot receive 181-byte packets!`;
+                if (negotiatedMTU < SENSOR_CONFIG.PACKET_SIZE_BYTES + 4) {
+                    const errorMsg = `CRITICAL: MTU ${negotiatedMTU} too small for ${SENSOR_CONFIG.PACKET_SIZE_BYTES}-byte packets!`;
                     console.error(`[BLE] ${errorMsg}`);
                     throw new Error(errorMsg);
                 }

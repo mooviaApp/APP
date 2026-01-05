@@ -90,8 +90,7 @@ export function useBLE(): UseBLEResult {
     const [whoAmI, setWhoAmI] = useState<WHOAMIResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
 
-    // Backend integration ref (to be set by component)
-    const backendTimerRef = useRef<NodeJS.Timeout | null>(null);
+
 
     // ==========================================================================
     // Event Handling
@@ -122,10 +121,7 @@ export function useBLE(): UseBLEResult {
                     setIsConnected(false);
                     setCurrentDevice(null);
                     setSensorData(null);
-                    if (backendTimerRef.current) {
-                        clearInterval(backendTimerRef.current);
-                        backendTimerRef.current = null;
-                    }
+                    setSensorData(null);
                     break;
 
                 case 'dataReceived':
@@ -173,9 +169,6 @@ export function useBLE(): UseBLEResult {
         bleService.initialize();
 
         return () => {
-            if (backendTimerRef.current) {
-                clearInterval(backendTimerRef.current);
-            }
             bleService.destroy();
         };
     }, [bleService]);
@@ -248,28 +241,60 @@ export function useBLE(): UseBLEResult {
     const startStreaming = useCallback(async () => {
         try {
             setError(null);
+
+            console.log('[STREAM] ========================================');
+            console.log('[STREAM] Starting Auto-Calibration Sequence');
+            console.log('[STREAM] ========================================');
+
+            // Step 1: Hardware Reset to ensure clean sensor state
+            console.log('[STREAM] Step 1/5: Hardware & Software Reset...');
+            trajectoryService.reset(); // Clear all previous state
+            await bleService.sendCommand(0x04); // RESET command
+            await new Promise(r => setTimeout(r, 800)); // Wait for sensor to reboot
+            console.log('[STREAM] ✅ Sensor rebooted');
+
+            // Step 2: Start Streaming
+            console.log('[STREAM] Step 2/5: Enabling data stream...');
             await bleService.startStreaming();
+            await new Promise(r => setTimeout(r, 200)); // Wait for notifications
+            console.log('[STREAM] ✅ Stream active');
 
-            // CRITICAL: Wait for BLE notifications to fully activate
-            // Without this delay, the first packets are lost (race condition)
-            await new Promise(r => setTimeout(r, 200));
-            console.log('[BLE] Streaming started, notifications active');
+            // Step 3: Wait for initial data packets
+            console.log('[STREAM] Step 3/5: Waiting for sensor data...');
+            let samplesReceived = 0;
+            const maxWaitTime = 3000; // 3 seconds max
+            const startTime = Date.now();
 
-            // Start periodic backend upload (every 1 second)
-            if (backendTimerRef.current) {
-                clearInterval(backendTimerRef.current);
+            while (samplesReceived < 20 && (Date.now() - startTime) < maxWaitTime) {
+                await new Promise(r => setTimeout(r, 50));
+                samplesReceived = bleService.getAndClearBuffer().length;
             }
 
-            backendTimerRef.current = setInterval(() => {
-                const samples = bleService.getAndClearBuffer();
-                if (samples.length > 0) {
-                    // TODO: Send to backend
-                    console.log(`Would send ${samples.length} samples to backend`);
-                    // This will be implemented when integrating with the backend API
-                }
-            }, 1000);
+            if (samplesReceived < 20) {
+                console.warn(`[STREAM] ⚠️  Only ${samplesReceived} samples received, proceeding anyway...`);
+            } else {
+                console.log(`[STREAM] ✅ Received ${samplesReceived} samples`);
+            }
+
+            // Step 4: Calibrate Sensor
+            console.log('[STREAM] Step 4/5: Calibrating sensor biases...');
+            try {
+                await trajectoryService.calibrateAsync();
+                console.log('[STREAM] ✅ Calibration complete');
+            } catch (calibErr: any) {
+                console.error('[STREAM] ❌ Calibration failed:', calibErr.message);
+                // Continue streaming even if calibration fails
+            }
+
+
+
+            console.log('[STREAM] ========================================');
+            console.log('[STREAM] ✅ Auto-Calibration Complete');
+            console.log('[STREAM] System ready for tracking');
+            console.log('[STREAM] ========================================');
 
         } catch (err: any) {
+            console.error('[STREAM] ❌ Stream start failed:', err.message);
             setError(err.message);
         }
     }, [bleService]);
@@ -279,9 +304,16 @@ export function useBLE(): UseBLEResult {
             setError(null);
             await bleService.stopStreaming();
 
-            if (backendTimerRef.current) {
-                clearInterval(backendTimerRef.current);
-                backendTimerRef.current = null;
+
+
+            // Apply post-processing corrections to captured raw data
+            console.log('[STREAM] Applying post-processing corrections to captured data...');
+            try {
+                trajectoryService.applyPostProcessingCorrections();
+                console.log('[STREAM] ✅ Post-processing complete - corrected trajectory ready');
+            } catch (postErr: any) {
+                console.error('[STREAM] ❌ Post-processing failed:', postErr.message);
+                // Don't fail the stop operation if post-processing fails
             }
         } catch (err: any) {
             setError(err.message);

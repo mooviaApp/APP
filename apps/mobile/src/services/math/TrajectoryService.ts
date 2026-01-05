@@ -59,7 +59,7 @@ export class TrajectoryService {
 
     // Measurement Noise
     private readonly MEAS_NOISE_ZUPT = 0.1; // m/s velocity uncertainty
-    private readonly MEAS_NOISE_GRAVITY = 0.05; // rad tilt uncertainty
+    private readonly MEAS_NOISE_GRAVITY = 0.05; // m/s^2 (Strong gravity trust)
 
     // ZUPT Detection
     private readonly ZUPT_ACCEL_WIN = 0.25; // s
@@ -82,6 +82,31 @@ export class TrajectoryService {
 
     // Snapshot
     private liftSnapshot: TrajectoryPoint[] = [];
+
+    // ========================================
+    // RAW DATA BUFFER FOR POST-PROCESSING
+    // ========================================
+    // Captures corrected accelerations for offline batch corrections
+    private rawDataBuffer: Array<{
+        timestamp: number;
+        acc_net: Vec3;      // Gravity-corrected acceleration (world frame)
+        acc_world: Vec3;    // Rotated acceleration before gravity removal
+        w_meas: Vec3;       // Gyro measurement (bias-corrected)
+        q: Quaternion;      // Orientation at this sample
+        p_raw: Vec3;        // Raw integrated position (with drift)
+        v_raw: Vec3;        // Raw integrated velocity (with drift)
+    }> = [];
+
+    // VBT: Vertical axis detection (from calibration)
+    private verticalAxis: 'x' | 'y' | 'z' = 'z'; // Default Z, updated in calibration
+    private verticalAxisSign: 1 | -1 = 1; // 1 = positive, -1 = negative
+
+    // Debug Throttling
+    private correctionLogCounter = 0;
+    private readonly LOG_THROTTLE = 100;
+
+    // Record-Only Mode
+    private realtimeEnabled = false;
 
     constructor() {
         this.reset();
@@ -112,6 +137,8 @@ export class TrajectoryService {
         this.wasMoving = false;
         this.baselineP = { x: 0, y: 0, z: 0 };
         this.isOrientationInitialized = false;
+        this.isCalibrating = false;
+        this.calibrationBuffer = [];
     }
 
     /**
@@ -141,6 +168,7 @@ export class TrajectoryService {
         this.path = [];
         this.accelBuffer = [];
         this.gyroBuffer = [];
+        this.rawDataBuffer = []; // Clear previous recording data
         this.wasMoving = false;
         this.baselineP = { x: 0, y: 0, z: 0 };
 
@@ -151,7 +179,7 @@ export class TrajectoryService {
     // --- Main Loop ---
 
     processSample(sample: IMUSample): TrajectoryPoint {
-        const t = new Date(sample.timestamp).getTime();
+        const t = sample.timestampMs;
 
         // Calibration Mode
         if (this.isCalibrating) {
@@ -164,17 +192,25 @@ export class TrajectoryService {
             };
         }
 
+        // ========================================
+        // CALIBRATION-ONLY MODE (Logic preserved)
+        // ========================================
+
         // --- CORRECCIÓN: Manejo del Primer Paquete ---
         if (this.lastTimestamp === 0) {
             this.lastTimestamp = t;
-            // Hot Start instantáneo
-            const a_init = { x: sample.ax * 9.81, y: sample.ay * 9.81, z: sample.az * 9.81 };
-            this.q = this.getRotationFromGravity(a_init.x, a_init.y, a_init.z);
-            this.isOrientationInitialized = true;
-            console.log('[ESKF] First packet: Orientation aligned to gravity.');
+            // Hot Start instantáneo ONLY if not calibrated
+            if (!this.isOrientationInitialized) {
+                const a_init = { x: sample.ax * 9.81, y: sample.ay * 9.81, z: sample.az * 9.81 };
+                this.q = this.getRotationFromGravity(a_init.x, a_init.y, a_init.z);
+                this.isOrientationInitialized = true;
+                console.log('[ESKF] First packet: Orientation aligned to gravity (Hot Start).');
+            } else {
+                console.log('[ESKF] First packet: Preserving Calibrated Orientation.');
+            }
             return {
                 timestamp: t,
-                position: { ...this.p },
+                position: Vec3Math.zero(), // Always [0,0,0]
                 rotation: { ...this.q },
                 relativePosition: Vec3Math.zero()
             };
@@ -184,7 +220,7 @@ export class TrajectoryService {
         if (dt <= 0) return this.getLastPoint(); // Duplicate sample
         this.lastTimestamp = t;
 
-        // 1. Unpack Raw Measurements
+        // 1. Unpack Raw Measurements (No Bias Subtraction yet - handled in predict)
         const a_meas: Vec3 = {
             x: sample.ax * 9.81,
             y: sample.ay * 9.81,
@@ -196,47 +232,77 @@ export class TrajectoryService {
             z: sample.gz * (Math.PI / 180)
         };
 
-        // 2. Prediction Step (Integrate Nominal + Covariance)
-        this.predict(a_meas, w_meas, dt);
-
-        // 3. Stationary Detection (ZUPT Trigger)
+        // 1.1 Update Stationary Detection Buffers (CRITICAL FIX)
+        // Feed physical units (m/s² and rad/s) to the sliding window
         this.updateBuffers(a_meas, w_meas);
+
+        // ========================================
+        // RAW INTEGRATION MODE (No Corrections)
+        // ========================================
+
+        // ========================================
+        // 1.5 Real-time Gravity Alignment (Drift Correction)
+        // ========================================
         const isStat = this.isStationary();
-        if (isStat) {
-            this.applyZUPT();
+
+        // Debug Status (Every 500ms ~ 500 samples)
+        if (this.path.length % 500 === 0) {
+            const a_mag = Math.sqrt(a_meas.x * a_meas.x + a_meas.y * a_meas.y + a_meas.z * a_meas.z);
+            console.log(`[ESKF-STATUS] Stationary: ${isStat} | |a|:${a_mag.toFixed(2)} | q:[${this.q.w.toFixed(2)},${this.q.x.toFixed(2)},${this.q.y.toFixed(2)},${this.q.z.toFixed(2)}]`);
+        }
+
+        // If the sensor is stationary, we TRUST Gravity more than the Gyroscope.
+        // We use the accelerometer to correct the tilt (Roll/Pitch).
+        if (isStat && this.isOrientationInitialized) {
             this.applyGravityAlignment(a_meas);
-
-            if (this.wasMoving) {
-                console.log('[REP] Finished movement. Baseline P will be updated on next move.');
-                this.wasMoving = false;
-            }
-        } else {
-            if (!this.wasMoving) {
-                console.log('[REP] Started movement. Setting current P as baseline for this rep.');
-                this.baselineP = { ...this.p };
-                this.wasMoving = true;
-            }
+            this.applyZUPT(); // Zero-Velocity Update to stop positional drift
         }
 
-        // Detección de fallo catastrófico (NaN o explosión de metros)
-        if (isNaN(this.p.x) || isNaN(this.p.z) || Math.abs(this.p.z) > 1000) {
-            console.warn("[ESKF] State exploded or became NaN! Emergency Reset.");
-            this.reset();
-            return this.getLastPoint();
-        }
+        // 2. Prediction Step (Integrate Nominal State Only)
+        // Returns the calculated accelerations (consistent with integration)
+        const { acc_net, acc_world } = this.predict(a_meas, w_meas, dt);
 
         // Relative position = current - baseline
         const relP = Vec3Math.sub(this.p, this.baselineP);
 
-        // Debug Logs (every 50 samples ~ 0.5s)
+        // ========================================
+        // CAPTURE RAW DATA FOR POST-PROCESSING
+        // ========================================
+        // Store corrected accelerations for offline batch corrections
+        // This buffer is filled from Stream On → Stream Off
+        this.rawDataBuffer.push({
+            timestamp: t,
+            acc_net,           // Gravity-corrected acceleration (from predict)
+            acc_world,         // Rotated acceleration (from predict)
+            w_meas,            // Raw gyro (conceptually we might want unbiased, but keeping structure)
+            q: { ...this.q },
+            p_raw: { ...this.p },
+            v_raw: { ...this.v }
+        });
+
+        // Debug Logs (every 50 samples ~ 50ms @ 1kHz)
         if (this.path.length % 50 === 0) {
-            console.log(`[ESKF] t:${t / 1000} P:[${this.p.x.toFixed(3)},${this.p.z.toFixed(3)}] V:${this.v.z.toFixed(3)} m/s ZUPT:${isStat}`);
+            const v_mag = Math.sqrt(this.v.x ** 2 + this.v.y ** 2 + this.v.z ** 2);
+            console.log(`[ESKF-RAW] t:${(t / 1000).toFixed(2)}s P:[${this.p.x.toFixed(3)},${this.p.y.toFixed(3)},${this.p.z.toFixed(3)}] V:${v_mag.toFixed(3)}m/s Buffer:${this.rawDataBuffer.length}`);
         }
 
-        // 4. Save and Return Point
+        // 4. Record-Only Mode Logic
+        // If realtimeEnabled is false, we do NOT update this.path, so the UI sees nothing (or static).
+        // The rawDataBuffer IS updated above, so post-processing will work.
+
+        if (!this.realtimeEnabled) {
+            return {
+                timestamp: t,
+                position: Vec3Math.zero(),
+                rotation: { ...this.q },
+                relativePosition: Vec3Math.zero()
+            };
+        }
+
+        // Real-time Mode: Push to path for live visualization
         const point: TrajectoryPoint = {
             timestamp: t,
-            position: { ...this.p },
+            position: { ...this.p },          // Real position (will drift)
             rotation: { ...this.q },
             relativePosition: relP
         };
@@ -244,21 +310,50 @@ export class TrajectoryService {
         return point;
     }
 
+    public setRealtimeEnabled(enabled: boolean) {
+        this.realtimeEnabled = enabled;
+        console.log(`[ESKF] Realtime visualization enabled: ${enabled}`);
+    }
+
     // --- ESKF Prediction ---
 
-    private predict(a_meas: Vec3, w_meas: Vec3, dt: number) {
+    private predict(a_meas: Vec3, w_meas: Vec3, dt: number): { acc_net: Vec3, acc_world: Vec3 } {
         // Correct measurements with current bias estimates
         const a_hat = Vec3Math.sub(a_meas, this.ab);
         const w_hat = Vec3Math.sub(w_meas, this.gb);
 
         // 1. Nominal State Integration
+
+        // UPDATE ORIENTATION FIRST (Fix 2)
+        this.q = QuatMath.integrate(this.q, w_hat, dt);
+        this.q = QuatMath.normalize(this.q);
+
+        // ROTATE ACCELERATION with new orientation
         const R = QuatMath.toRotationMatrix(this.q);
         const acc_world = R.multiplyVec(a_hat);
-        const acc_net = { x: acc_world.x, y: acc_world.y, z: acc_world.z - this.GRAVITY_MAG };
 
+        // SUBTRACT GRAVITY (Model: g_world = [0, 0, 9.81])
+        const g_world: Vec3 = { x: 0, y: 0, z: this.GRAVITY_MAG };
+        const acc_net = Vec3Math.sub(acc_world, g_world); // Kinematic acceleration
+
+        // Guard: Check for NaN/Infinity in accelerations
+        if (!isFinite(acc_world.x) || !isFinite(acc_world.y) || !isFinite(acc_world.z) ||
+            !isFinite(acc_net.x) || !isFinite(acc_net.y) || !isFinite(acc_net.z)) {
+            console.error('[ESKF-PREDICT] ❌ NaN/Infinity detected in acceleration, discarding sample');
+            return { acc_net: Vec3Math.zero(), acc_world: Vec3Math.zero() };
+        }
+
+        // Validation logs every 200 samples (~200ms @ 1kHz)
+        if (this.path.length % 200 === 0) {
+            const a_meas_mag = Math.sqrt(a_meas.x ** 2 + a_meas.y ** 2 + a_meas.z ** 2);
+            const acc_world_mag = Math.sqrt(acc_world.x ** 2 + acc_world.y ** 2 + acc_world.z ** 2);
+            const acc_net_mag = Math.sqrt(acc_net.x ** 2 + acc_net.y ** 2 + acc_net.z ** 2);
+            console.log(`[ESKF-PREDICT] |a_meas|:${a_meas_mag.toFixed(2)} |acc_world|:${acc_world_mag.toFixed(2)} |acc_net|:${acc_net_mag.toFixed(2)} acc_net.xy:[${acc_net.x.toFixed(3)},${acc_net.y.toFixed(3)}]`);
+        }
+
+        // INTEGRATE POSITION AND VELOCITY
         this.p = Vec3Math.add(this.p, Vec3Math.add(Vec3Math.scale(this.v, dt), Vec3Math.scale(acc_net, 0.5 * dt * dt)));
         this.v = Vec3Math.add(this.v, Vec3Math.scale(acc_net, dt));
-        this.q = QuatMath.integrate(this.q, w_hat, dt);
 
         // 2. Error State Transition Matrix (F) and Covariance Propagation
         // F is 15x15. We construct it explicitly.
@@ -268,17 +363,8 @@ export class TrajectoryService {
         F.set(0, 3, dt); F.set(1, 4, dt); F.set(2, 5, dt);
 
         // Block: dv/dtheta (skew(R*a_hat) * dt) ?? No, it's -R * skew(a_hat) * dt
-        // R_a_hat = R * a_hat
-        const Ra_hat = R.multiplyVec(a_hat);
-        // skew(Ra_hat)
-        // [  0    -az   ay ]
-        // [  az    0   -ax ]
-        // [ -ay   ax    0  ]
-        // But the term in error dynamics for v_dot error is -R * skew(a_hat) * dtheta (local error) ? 
-        // Standard ESKF (Sola): v_dot_err = -R * skew(a_hat) * dtheta - R * da_b
-        // Actually, skew(R * a_hat) is global frame. -skew(Ra_hat) * dtheta_global? 
-        // Let's stick to standard error definitions: dtheta is GLOBAL error.
-        // Then v_dot_err = -skew(acc_world) * dtheta - R * da_b
+        // Using updated R and a_hat (which matches the integration above)
+        // skew(acc_world) is used for global error definition
 
         const F_v_theta = new Mat3([
             0, -acc_world.z, acc_world.y,
@@ -294,9 +380,6 @@ export class TrajectoryService {
         for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) F.set(3 + r, 9 + c, F_v_ab.get(r, c));
 
         // Block: dtheta/dtheta (Identity approx for small w, strictly exp(-skew(w)*dt))
-        // dtheta_new = dtheta - R * dgb * dt (if local error)
-        // If dtheta is global, dtheta_dot = -skew(w_hat) * dtheta - R * dgb ??
-        // Simplified: I for small dt.
 
         // Block: dtheta/dg_b (-R * dt)
         const F_theta_gb = R.scale(-dt);
@@ -327,6 +410,8 @@ export class TrajectoryService {
 
         // Save back to Float64Array
         this.P.set(P_pred.data);
+
+        return { acc_net, acc_world };
     }
 
     // --- ZUPT Update (Correct) ---
@@ -379,6 +464,14 @@ export class TrajectoryService {
         for (let i = 0; i < 15; i++) {
             dx[i] = K[i * 3 + 0] * (-this.v.x) + K[i * 3 + 1] * (-this.v.y) + K[i * 3 + 2] * (-this.v.z);
         }
+
+        // --- DEBUG LOGS ---
+        this.correctionLogCounter++;
+        if (this.correctionLogCounter % this.LOG_THROTTLE === 0) {
+            const dx_v_mag = Math.sqrt(dx[3] ** 2 + dx[4] ** 2 + dx[5] ** 2);
+            console.log(`[ESKF-ZUPT] Correcting Vel: Innovation:[${(-this.v.x).toFixed(4)},${(-this.v.y).toFixed(4)},${(-this.v.z).toFixed(4)}] S_diag:[${S.get(0, 0).toFixed(4)},${S.get(1, 1).toFixed(4)},${S.get(2, 2).toFixed(4)}] dx_mag:${dx_v_mag.toFixed(6)}`);
+        }
+
         this.injectError(dx);
 
         // 5. Update Covariance: P = P - K * (H * P)
@@ -521,6 +614,13 @@ export class TrajectoryService {
         for (let i = 0; i < 15; i++) {
             dx[i] = K[i * 3 + 0] * y_res.x + K[i * 3 + 1] * y_res.y + K[i * 3 + 2] * y_res.z;
         }
+
+        // --- DEBUG LOGS ---
+        if (this.correctionLogCounter % this.LOG_THROTTLE === 0) {
+            const dx_theta_mag = Math.sqrt(dx[6] ** 2 + dx[7] ** 2 + dx[8] ** 2);
+            console.log(`[ESKF-GRAV] Correcting Tilt: Res:[${y_res.x.toFixed(4)},${y_res.y.toFixed(4)},${y_res.z.toFixed(4)}] S_diag:[${S.get(0, 0).toFixed(4)},${S.get(1, 1).toFixed(4)},${S.get(2, 2).toFixed(4)}] dx_theta_mag:${dx_theta_mag.toFixed(6)}rad`);
+        }
+
         this.injectError(dx);
 
         // Update P = P - K*H*P
@@ -601,6 +701,7 @@ export class TrajectoryService {
      * PUBLIC: Used by UI for lift start/stop detection
      */
     public isStationary(): boolean {
+        // Assume NOT stationary until we have enough data
         if (this.accelBuffer.length < this.BUFFER_SIZE) return false;
 
         // 1. Calcular Media
@@ -611,9 +712,9 @@ export class TrajectoryService {
         const varA = this.accelBuffer.reduce((s, v) => s + (v - avgA) ** 2, 0) / this.accelBuffer.length;
 
         // UMBRALES RECOMENDADOS PARA PESAS
-        const ACCEL_MEAN_TOLERANCE = 0.3; // m/s^2 (aprox 0.03g deviation from gravity)
-        const ACCEL_VAR_TOLERANCE = 0.05; // m/s^2 variance (muy estable)
-        const GYRO_MEAN_TOLERANCE = 0.05; // rad/s (aprox 3 deg/s)
+        const ACCEL_MEAN_TOLERANCE = 0.5; // m/s^2 (tolerant to offset)
+        const ACCEL_VAR_TOLERANCE = 0.2; // m/s^2 variance (allow hand jitter)
+        const GYRO_MEAN_TOLERANCE = 0.1; // rad/s (tolerant to slow rotation)
 
         // Check 1: Gyroscope quietness (Rotation kills position accuracy)
         if (avgW > GYRO_MEAN_TOLERANCE) return false;
@@ -645,6 +746,7 @@ export class TrajectoryService {
     getPath() { return this.path; }
     getOrientation() { return this.q; }
     getVelocity() { return this.v; }
+    getIsCalibrating() { return this.isCalibrating; }
 
     // Función auxiliar matemática
     // Calcula el cuaternión (Body -> World) que alinea la aceleración medida con el eje Z vertical [0,0,1]
@@ -742,6 +844,24 @@ export class TrajectoryService {
         console.log(`[ESKF]   Z: ${avgAz_g.toFixed(3)} g  (${avgAz.toFixed(2)} m/s²)`);
         console.log('[ESKF] → The axis closest to ±1.0g is your gravity axis');
         console.log('[ESKF] ========================================');
+
+        // VBT: Detect which axis is vertical (closest to ±1g)
+        const absX = Math.abs(avgAx_g);
+        const absY = Math.abs(avgAy_g);
+        const absZ = Math.abs(avgAz_g);
+
+        if (absX > absY && absX > absZ) {
+            this.verticalAxis = 'x';
+            this.verticalAxisSign = avgAx_g > 0 ? 1 : -1;
+        } else if (absY > absX && absY > absZ) {
+            this.verticalAxis = 'y';
+            this.verticalAxisSign = avgAy_g > 0 ? 1 : -1;
+        } else {
+            this.verticalAxis = 'z';
+            this.verticalAxisSign = avgAz_g > 0 ? 1 : -1;
+        }
+
+        console.log(`[VBT] Vertical Axis Detected: ${this.verticalAxis.toUpperCase()} (${this.verticalAxisSign > 0 ? '+' : '-'}${this.verticalAxis})`);
 
         // Calculamos la rotación inicial basada en la gravedad
         const initialQ = this.getRotationFromGravity(avgAx, avgAy, avgAz);
@@ -908,6 +1028,248 @@ export class TrajectoryService {
     getLiftSnapshot() { return this.liftSnapshot; }
     hasLiftSnapshot() { return this.liftSnapshot.length > 0; }
     clearLiftSnapshot() { this.liftSnapshot = []; }
+
+    // Raw Data Buffer API (for post-processing)
+    getRawDataBuffer() {
+        console.log(`[RAW-BUFFER] Returning ${this.rawDataBuffer.length} samples for post-processing`);
+        return this.rawDataBuffer;
+    }
+
+    clearRawDataBuffer() {
+        console.log(`[RAW-BUFFER] Clearing ${this.rawDataBuffer.length} samples`);
+        this.rawDataBuffer = [];
+    }
+
+
+    /**
+     * POST-PROCESSING: Apply offline corrections to raw data buffer
+     * Called after Stream Off to correct drift using ZUPT + Boundary + Smoothing
+     * 
+     * Assumptions:
+     * - Movement starts and ends at rest (v₀ = vₙ = 0)
+     * - Movement returns to initial position (p₀ ≈ pₙ)
+     * - Suitable for weightlifting: squat, bench, deadlift, etc.
+     */
+    applyPostProcessingCorrections() {
+        if (this.rawDataBuffer.length < 10) {
+            console.warn('[POST-PROC] Insufficient data for corrections');
+            return;
+        }
+
+        const N = this.rawDataBuffer.length;
+        console.log('[POST-PROC] ========================================');
+        console.log('[POST-PROC] STARTING CORRECTIONS');
+        console.log('[POST-PROC] ========================================');
+        console.log(`[POST-PROC] Samples: ${N}`);
+
+        // STEP 0: Analyze raw data
+        const v_initial = this.rawDataBuffer[0].v_raw;
+        const v_final = this.rawDataBuffer[N - 1].v_raw;
+        const p_initial = this.rawDataBuffer[0].p_raw;
+        const p_final = this.rawDataBuffer[N - 1].p_raw;
+
+        const v_final_mag = Math.sqrt(v_final.x ** 2 + v_final.y ** 2 + v_final.z ** 2);
+        const p_final_mag = Math.sqrt(p_final.x ** 2 + p_final.y ** 2 + p_final.z ** 2);
+
+        console.log(`[POST-PROC] RAW DATA:`);
+        console.log(`[POST-PROC]   V_initial: [${v_initial.x.toFixed(3)}, ${v_initial.y.toFixed(3)}, ${v_initial.z.toFixed(3)}] m/s`);
+        console.log(`[POST-PROC]   V_final: [${v_final.x.toFixed(3)}, ${v_final.y.toFixed(3)}, ${v_final.z.toFixed(3)}] = ${v_final_mag.toFixed(3)} m/s`);
+        console.log(`[POST-PROC]   P_final: [${p_final.x.toFixed(3)}, ${p_final.y.toFixed(3)}, ${p_final.z.toFixed(3)}] = ${p_final_mag.toFixed(3)} m drift`);
+
+        // STEP 1: ZUPT - Force zero velocity at start and end
+        console.log('[POST-PROC] ----------------------------------------');
+        console.log('[POST-PROC] Step 1/3: ZUPT (Zero-velocity Update)');
+        console.log('[POST-PROC] ----------------------------------------');
+
+        // Redistribute velocity error linearly
+        for (let i = 0; i < N; i++) {
+            const ratio = i / (N - 1);
+            this.rawDataBuffer[i].v_raw = {
+                x: this.rawDataBuffer[i].v_raw.x - (v_final.x * ratio),
+                y: this.rawDataBuffer[i].v_raw.y - (v_final.y * ratio),
+                z: this.rawDataBuffer[i].v_raw.z - (v_final.z * ratio)
+            };
+        }
+
+        const v_after_zupt = this.rawDataBuffer[N - 1].v_raw;
+        const v_zupt_mag = Math.sqrt(v_after_zupt.x ** 2 + v_after_zupt.y ** 2 + v_after_zupt.z ** 2);
+        console.log(`[POST-PROC]   ✅ V_final after ZUPT: ${v_zupt_mag.toFixed(6)} m/s (should be ~0)`);
+
+        // STEP 2: Re-integrate position with corrected velocity
+        console.log('[POST-PROC] ----------------------------------------');
+        console.log('[POST-PROC] Step 2/3: Re-integrate Position');
+        console.log('[POST-PROC] ----------------------------------------');
+
+        this.rawDataBuffer[0].p_raw = Vec3Math.zero(); // Start at origin
+
+        for (let i = 1; i < N; i++) {
+            const dt = (this.rawDataBuffer[i].timestamp - this.rawDataBuffer[i - 1].timestamp) / 1000.0;
+            const v_avg = {
+                x: (this.rawDataBuffer[i].v_raw.x + this.rawDataBuffer[i - 1].v_raw.x) / 2,
+                y: (this.rawDataBuffer[i].v_raw.y + this.rawDataBuffer[i - 1].v_raw.y) / 2,
+                z: (this.rawDataBuffer[i].v_raw.z + this.rawDataBuffer[i - 1].v_raw.z) / 2
+            };
+
+            this.rawDataBuffer[i].p_raw = {
+                x: this.rawDataBuffer[i - 1].p_raw.x + v_avg.x * dt,
+                y: this.rawDataBuffer[i - 1].p_raw.y + v_avg.y * dt,
+                z: this.rawDataBuffer[i - 1].p_raw.z + v_avg.z * dt
+            };
+        }
+
+        const p_after_reintegrate = this.rawDataBuffer[N - 1].p_raw;
+        const p_reint_mag = Math.sqrt(p_after_reintegrate.x ** 2 + p_after_reintegrate.y ** 2 + p_after_reintegrate.z ** 2);
+        console.log(`[POST-PROC]   P_final after re-integration: [${p_after_reintegrate.x.toFixed(3)}, ${p_after_reintegrate.y.toFixed(3)}, ${p_after_reintegrate.z.toFixed(3)}] = ${p_reint_mag.toFixed(3)} m`);
+
+        // STEP 3: BOUNDARY - Force return to origin (p_final = p_initial = 0)
+        console.log('[POST-PROC] ----------------------------------------');
+        console.log('[POST-PROC] Step 3/3: Boundary Conditions (p₀ = pₙ = 0)');
+        console.log('[POST-PROC] ----------------------------------------');
+
+        // LINEAR DETRENDING: Remove linear drift trend
+        // Assumption: p[0] = 0, p[N] = 0 (movement returns to start)
+        // Method: Subtract drift linearly proportional to time
+
+        // Force boundary constraints
+        this.rawDataBuffer[0].p_raw = Vec3Math.zero(); // Already set, but enforce
+
+        // Distribute drift error linearly across trajectory
+        for (let i = 1; i < N; i++) {
+            const ratio = i / (N - 1); // 0 → 1
+
+            // Linear interpolation: subtract (drift * ratio) from each point
+            // At i=0: ratio=0 → no correction (already p=0)
+            // At i=N: ratio=1 → full drift correction (p=0)
+            this.rawDataBuffer[i].p_raw = {
+                x: this.rawDataBuffer[i].p_raw.x - (p_after_reintegrate.x * ratio),
+                y: this.rawDataBuffer[i].p_raw.y - (p_after_reintegrate.y * ratio),
+                z: this.rawDataBuffer[i].p_raw.z - (p_after_reintegrate.z * ratio)
+            };
+        }
+
+        const p_final_corrected = this.rawDataBuffer[N - 1].p_raw;
+        const p_corrected_mag = Math.sqrt(p_final_corrected.x ** 2 + p_final_corrected.y ** 2 + p_final_corrected.z ** 2);
+        console.log(`[POST-PROC]   ✅ P_final after boundary: [${p_final_corrected.x.toFixed(6)}, ${p_final_corrected.y.toFixed(6)}, ${p_final_corrected.z.toFixed(6)}] = ${p_corrected_mag.toFixed(6)} m`);
+
+        // Find maximum displacement during movement
+        let max_displacement = 0;
+        for (const sample of this.rawDataBuffer) {
+            const disp = Math.sqrt(sample.p_raw.x ** 2 + sample.p_raw.y ** 2 + sample.p_raw.z ** 2);
+            if (disp > max_displacement) max_displacement = disp;
+        }
+
+        console.log('[POST-PROC] ========================================');
+        console.log('[POST-PROC] ✅ CORRECTIONS COMPLETE');
+        console.log('[POST-PROC] ========================================');
+        console.log(`[POST-PROC] Max displacement: ${max_displacement.toFixed(3)} m`);
+        console.log(`[POST-PROC] Final drift: ${p_corrected_mag.toFixed(6)} m (should be ~0)`)
+            ;
+        console.log(`[POST-PROC] Corrected trajectory ready for display`);
+
+        // Calculate VBT metrics using vertical axis
+        this.calculateVBTMetrics();
+
+        // Update main path with corrected data
+        this.updatePathWithCorrectedData();
+    }
+
+    /**
+     * Calculate VBT (Velocity-Based Training) metrics using only vertical axis
+     * Uses acc_net from rawDataBuffer to compute velocity in vertical direction
+     */
+    private calculateVBTMetrics() {
+        if (this.rawDataBuffer.length < 10) {
+            console.warn('[VBT] Insufficient data for metrics calculation');
+            return;
+        }
+
+        console.log('[VBT] ========================================');
+        console.log('[VBT] VELOCITY-BASED TRAINING METRICS');
+        console.log('[VBT] ========================================');
+        console.log(`[VBT] Vertical Axis: ${this.verticalAxis.toUpperCase()} (${this.verticalAxisSign > 0 ? '+' : '-'}${this.verticalAxis})`);
+
+        // Extract vertical acceleration component for each sample
+        let v_vertical = 0; // Vertical velocity
+        let peak_velocity = 0;
+        let concentric_start_time = 0;
+        let concentric_end_time = 0;
+        let mpv_sum = 0;
+        let mpv_count = 0;
+        let in_concentric_phase = false;
+
+        const ACCELERATION_THRESHOLD = 0.1; // m/s² - threshold to detect concentric phase
+
+        for (let i = 1; i < this.rawDataBuffer.length; i++) {
+            const dt = (this.rawDataBuffer[i].timestamp - this.rawDataBuffer[i - 1].timestamp) / 1000.0;
+
+            // Extract vertical component from acc_net
+            let acc_vertical = 0;
+            const acc = this.rawDataBuffer[i].acc_net;
+
+            switch (this.verticalAxis) {
+                case 'x':
+                    acc_vertical = acc.x * this.verticalAxisSign;
+                    break;
+                case 'y':
+                    acc_vertical = acc.y * this.verticalAxisSign;
+                    break;
+                case 'z':
+                    acc_vertical = acc.z * this.verticalAxisSign;
+                    break;
+            }
+
+            // Integrate to get velocity
+            v_vertical += acc_vertical * dt;
+
+            // Detect concentric phase (upward movement with positive acceleration)
+            if (acc_vertical > ACCELERATION_THRESHOLD && !in_concentric_phase) {
+                in_concentric_phase = true;
+                concentric_start_time = this.rawDataBuffer[i].timestamp;
+            }
+
+            // Track peak velocity during concentric phase
+            if (in_concentric_phase) {
+                if (Math.abs(v_vertical) > Math.abs(peak_velocity)) {
+                    peak_velocity = v_vertical;
+                }
+
+                // Mean Propulsive Velocity (average during positive acceleration)
+                if (acc_vertical > 0) {
+                    mpv_sum += Math.abs(v_vertical);
+                    mpv_count++;
+                }
+
+                // End of concentric phase (acceleration turns negative or velocity drops)
+                if (acc_vertical < -ACCELERATION_THRESHOLD || v_vertical < 0) {
+                    concentric_end_time = this.rawDataBuffer[i].timestamp;
+                    in_concentric_phase = false;
+                }
+            }
+        }
+
+        // Calculate metrics
+        const mpv = mpv_count > 0 ? mpv_sum / mpv_count : 0;
+        const concentric_time = concentric_end_time > 0 ? (concentric_end_time - concentric_start_time) / 1000.0 : 0;
+
+        console.log(`[VBT] Peak Velocity: ${Math.abs(peak_velocity).toFixed(3)} m/s`);
+        console.log(`[VBT] Mean Propulsive Velocity (MPV): ${mpv.toFixed(3)} m/s`);
+        console.log(`[VBT] Concentric Time: ${concentric_time.toFixed(3)} s`);
+        console.log('[VBT] ========================================');
+    }
+
+    /**
+     * Update this.path[] with corrected data from rawDataBuffer
+     */
+    private updatePathWithCorrectedData() {
+        this.path = this.rawDataBuffer.map(sample => ({
+            timestamp: sample.timestamp,
+            position: { ...sample.p_raw },
+            rotation: { ...sample.q },
+            relativePosition: { ...sample.p_raw } // Relative to origin (0,0,0)
+        }));
+
+        console.log(`[POST-PROC] Updated path[] with ${this.path.length} corrected samples`);
+    }
 
     private getLastPoint(): TrajectoryPoint {
         return this.path.length > 0 ? this.path[this.path.length - 1] : {

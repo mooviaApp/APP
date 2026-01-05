@@ -47,6 +47,18 @@ export function readInt16LE(bytes: Uint8Array, offset: number): number {
     return value > 0x7FFF ? value - 0x10000 : value;
 }
 
+/**
+ * Read an unsigned 16-bit integer in little-endian format
+ * @param bytes - Byte array
+ * @param offset - Starting offset
+ * @returns Unsigned uint16 value
+ */
+export function readUint16LE(bytes: Uint8Array, offset: number): number {
+    const low = bytes[offset];
+    const high = bytes[offset + 1];
+    return (high << 8) | low;
+}
+
 // ============================================================================
 // Physical Unit Conversion
 // ============================================================================
@@ -97,10 +109,11 @@ export function rawToAccel(raw: number): number {
 export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
     // Dynamic Packet Size Handling
     const payloadSize = bytes.length - 1;
-    const BYTES_PER_SAMPLE = 12;
+    const BYTES_PER_SAMPLE = 14; // Updated for V2 (includes timestamp)
 
+    // Check payload validity
     if (payloadSize % BYTES_PER_SAMPLE !== 0) {
-        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (Payload ${payloadSize} not multiple of 12)`);
+        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (Payload ${payloadSize} not multiple of ${BYTES_PER_SAMPLE})`);
         return [];
     }
 
@@ -111,39 +124,73 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
         return [];
     }
 
-    const samples: IMUSample[] = [];
-    // Use current time as base.
-    // We assume samples are 1ms apart (1kHz).
-    // Timestamp strategy: Last sample is "now", previous are -1ms, -2ms...
-    const now = Date.now();
+    // Temporary storage for parsed raw values
+    const parsedRaw: {
+        ax: number; ay: number; az: number;
+        gx: number; gy: number; gz: number;
+        hwTs: number;
+    }[] = [];
 
+    // 1. Parse Bytes
     for (let i = 0; i < sampleCount; i++) {
         const offset = 1 + (i * BYTES_PER_SAMPLE);
 
-        // Read raw int16 values for this sample
-        // Little Endian
         const rawAx = readInt16LE(bytes, offset + 0);
         const rawAy = readInt16LE(bytes, offset + 2);
         const rawAz = readInt16LE(bytes, offset + 4);
         const rawGx = readInt16LE(bytes, offset + 6);
         const rawGy = readInt16LE(bytes, offset + 8);
         const rawGz = readInt16LE(bytes, offset + 10);
+        const hwTs = readUint16LE(bytes, offset + 12); // New: Timestamp
 
-        // Calculate timestamp for this sample
-        // sample[i] time = now - (total - 1 - i) * interval
-        const timeOffset = (sampleCount - 1 - i) * SENSOR_CONFIG.SAMPLE_INTERVAL_MS;
-        const sampleTimestamp = new Date(now - timeOffset).toISOString();
-
-        // Convert to physical units and add to array
-        samples.push({
-            timestamp: sampleTimestamp,
+        parsedRaw.push({
             ax: rawToAccel(rawAx),
             ay: rawToAccel(rawAy),
             az: rawToAccel(rawAz),
             gx: rawToGyro(rawGx),
             gy: rawToGyro(rawGy),
             gz: rawToGyro(rawGz),
+            hwTs
         });
+    }
+
+    // 2. Reconstruct Relative Timing
+    // Strategy: Anchor last sample to Date.now(), back-calculate others using hwTs deltas
+    const samples: IMUSample[] = new Array(sampleCount);
+    const now = Date.now();
+
+    // Initialize last sample
+    if (sampleCount > 0) {
+        const lastIdx = sampleCount - 1;
+        const lastRaw = parsedRaw[lastIdx];
+
+        samples[lastIdx] = {
+            timestamp: new Date(now).toISOString(),
+            timestampMs: now,
+            ax: lastRaw.ax, ay: lastRaw.ay, az: lastRaw.az,
+            gx: lastRaw.gx, gy: lastRaw.gy, gz: lastRaw.gz,
+        };
+
+        // Back-fill previous samples
+        for (let i = lastIdx - 1; i >= 0; i--) {
+            const curr = parsedRaw[i];
+            const next = parsedRaw[i + 1]; // We know next is valid because we go backwards
+            const nextTime = samples[i + 1].timestampMs;
+
+            // Calculate delta ticks (handling 16-bit wrap-around)
+            let deltaTicks = (next.hwTs - curr.hwTs);
+            if (deltaTicks < 0) deltaTicks += 65536;
+
+            // Compute time: next - delta
+            const currTime = nextTime - (deltaTicks * SENSOR_CONFIG.SAMPLE_INTERVAL_MS);
+
+            samples[i] = {
+                timestamp: new Date(currTime).toISOString(),
+                timestampMs: currTime,
+                ax: curr.ax, ay: curr.ay, az: curr.az,
+                gx: curr.gx, gy: curr.gy, gz: curr.gz,
+            };
+        }
     }
 
     return samples;

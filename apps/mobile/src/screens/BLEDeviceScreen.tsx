@@ -5,7 +5,7 @@
  * Includes device scanner, connection status, control buttons, and data display.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
     View,
     Text,
@@ -20,6 +20,7 @@ import { Device } from 'react-native-ble-plx';
 // type Device = any; // Mock type for Device since library is removed
 import { useBLE } from '../hooks/useBLE';
 import { SensorDataCard } from '../components/SensorDataCard';
+import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
 
 const COLORS = {
     primary: '#501FF0',
@@ -34,6 +35,8 @@ const COLORS = {
 };
 
 export function BLEDeviceScreen() {
+    const [finalPath, setFinalPath] = useState<TrajectoryPoint[]>([]);
+
     const {
         isScanning,
         isConnected,
@@ -52,27 +55,24 @@ export function BLEDeviceScreen() {
         stopStreaming,
         resetIMU,
         clearError,
-        calibrateSensor, // Import the new function from hook
+        calibrateSensor, // REMOVED - now automatic in Stream On
     } = useBLE();
 
-    // Local state for calibration loading
-    const [isCalibrating, setIsCalibrating] = React.useState(false);
-
-    const handleCalibrate = async () => {
-        setIsCalibrating(true);
-        try {
-            await calibrateSensor();
-        } finally {
-            setIsCalibrating(false);
-        }
+    const handleStartStreaming = async () => {
+        setFinalPath([]); // Clear previous graph
+        await startStreaming();
     };
 
-    const handleReset = async () => {
+    const handleStopStreaming = async () => {
         try {
-            await resetIMU();
-            console.log('[UI] Kinematic reset performed');
-        } catch (error) {
-            console.error('[UI] Reset failed:', error);
+            await stopStreaming();
+            const points = trajectoryService.getPath().length;
+            console.log('[UI] Stream stopped. Updating graph path with ' + points + ' points');
+            setFinalPath([...trajectoryService.getPath()]);
+            // DEBUG ALERT: Confirm data quantity to user
+            Alert.alert("Debug Graph", `Calculated Trajectory Points: ${points}\n(If >0, graph should appear below)`);
+        } catch (e: any) {
+            Alert.alert("Error", "Failed to stop stream: " + e.message);
         }
     };
 
@@ -207,31 +207,24 @@ export function BLEDeviceScreen() {
                                 />
                                 <ControlButton
                                     label="Stream On"
-                                    onPress={startStreaming}
+                                    onPress={handleStartStreaming}
                                     color={COLORS.success}
                                     icon="▶"
                                 />
+                            </View>
+
+                            <View style={[styles.controlGrid, { marginTop: 12 }]}>
                                 <ControlButton
                                     label="Stream Off"
-                                    onPress={stopStreaming}
+                                    onPress={handleStopStreaming}
                                     color={COLORS.warning}
                                     icon="■"
                                 />
-                            </View>
-
-                            {/* Calibration and Reset Row */}
-                            <View style={styles.controlGrid}>
                                 <ControlButton
-                                    label={isCalibrating ? "Calibrating..." : "Calibrate"}
-                                    onPress={handleCalibrate}
-                                    color="#FF6B35"
-                                    icon={isCalibrating ? "⏳" : "⚙️"}
-                                />
-                                <ControlButton
-                                    label="Reset"
-                                    onPress={handleReset}
-                                    color="#4ECDC4"
-                                    icon="🔄"
+                                    label="Hard Reset"
+                                    onPress={resetIMU}
+                                    color={COLORS.danger}
+                                    icon="🔌"
                                 />
                             </View>
 
@@ -243,8 +236,12 @@ export function BLEDeviceScreen() {
                             </TouchableOpacity>
                         </View>
 
-                        {/* Sensor Data */}
-                        <SensorDataCard data={sensorData} />
+                        {/* Sensor Data Monitor */}
+                        <SensorDataCard
+                            data={sensorData}
+                            isCalibrating={trajectoryService.getIsCalibrating()}
+                            trajectoryPath={finalPath}
+                        />
 
                         {/* Logs */}
                         {logs.length > 0 && (
@@ -263,7 +260,7 @@ export function BLEDeviceScreen() {
                     </>
                 )}
             </ScrollView>
-        </View>
+        </View >
     );
 }
 

@@ -78,11 +78,11 @@ export const SENSOR_CONFIG = {
     /** Number of samples per BLE packet from firmware */
     SAMPLES_PER_PACKET: 15,
 
-    /** Bytes per sample (6 int16 values = 12 bytes) */
-    BYTES_PER_SAMPLE: 12,
+    /** Bytes per sample (6 int16 values + 1 uint16 timestamp = 14 bytes) */
+    BYTES_PER_SAMPLE: 14,
 
-    /** Total packet size (1 byte type + 15 samples × 12 bytes) */
-    PACKET_SIZE_BYTES: 181,
+    /** Total packet size (1 byte type + 15 samples × 14 bytes) */
+    PACKET_SIZE_BYTES: 211,
 
     /** Expected sample interval in ms (1 ms per sample) */
     SAMPLE_INTERVAL_MS: 1,
@@ -102,8 +102,8 @@ export const SENSOR_CONFIG = {
 // ============================================================================
 
 export const BLE_CONFIG = {
-    /** Required MTU size for 181-byte packets (181 + 3 bytes overhead + margin) */
-    REQUIRED_MTU: 184,
+    /** Required MTU size for 211-byte packets (211 + 3 bytes overhead + margin) */
+    REQUIRED_MTU: 247,
 
     /** Scan timeout in milliseconds */
     SCAN_TIMEOUT_MS: 10000,
@@ -126,19 +126,10 @@ export type BLECommand = typeof BLE_COMMANDS[keyof typeof BLE_COMMANDS];
 export type MessageType = typeof MESSAGE_TYPES[keyof typeof MESSAGE_TYPES];
 
 export interface IMUSample {
-    /** Timestamp in ISO 8601 format */
-    timestamp: string;
-
-    /** Accelerometer X-axis (g) */
+    // Raw Data (15 samples per packet)
     ax: number;
-
-    /** Accelerometer Y-axis (g) */
     ay: number;
-
-    /** Accelerometer Z-axis (g) */
     az: number;
-
-    /** Gyroscope X-axis (dps) */
     gx: number;
 
     /** Gyroscope Y-axis (dps) */
@@ -146,6 +137,12 @@ export interface IMUSample {
 
     /** Gyroscope Z-axis (dps) */
     gz: number;
+
+    /** Timestamp in ISO 8601 format (Legacy) */
+    timestamp?: string;
+
+    /** Monotonic timestamp in milliseconds (Preferred) */
+    timestampMs: number;
 }
 
 export interface LogMessage {
