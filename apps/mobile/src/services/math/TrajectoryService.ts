@@ -39,6 +39,10 @@ class Madgwick {
         this.q = { ...q };
     }
 
+    public setBeta(newBeta: number) {
+        this.beta = newBeta;
+    }
+
     public update(gx: number, gy: number, gz: number, ax: number, ay: number, az: number) {
         let q1 = this.q.w, q2 = this.q.x, q3 = this.q.y, q4 = this.q.z;
         const normRecip = (n: number) => (n === 0 ? 0 : 1 / Math.sqrt(n));
@@ -239,6 +243,19 @@ export class TrajectoryService {
         if (dt <= 0) return this.getLastPoint();
         this.lastTimestamp = t;
 
+        // =============================================================
+        // CORRECCIÓN VISUAL: "Turbo Boost" para arranque rápido
+        // =============================================================
+        // Si llevamos pocos samples (ej. < 200, aprox 2 segundos), 
+        // usamos un Beta agresivo para que el cubo se enderece rápido.
+        // Luego pasamos a modo suave para filtrar vibraciones.
+        if (this.path.length < 200) {
+            this.madgwick.setBeta(2.5); // Modo Rápido (corrige en <0.5s)
+        } else {
+            this.madgwick.setBeta(0.1); // Modo Suave (estándar)
+        }
+        // =============================================================
+
         // 1. Raw Measurements (Physical Units)
         const a_meas: Vec3 = {
             x: sample.ax * 9.81,
@@ -285,9 +302,8 @@ export class TrajectoryService {
         const acc_world = R.multiplyVec(a_hat);
 
         // C. Subtract Gravity
-        // Model: Gravity is [0, 0, 9.81] in World.
-        // CORRECCIÓN: Como invertimos la calibración, la gravedad está en -Z
-        const g_world: Vec3 = { x: 0, y: 0, z: -this.GRAVITY }; // <--- NÓTESE EL MENOS (-)
+        // Model: Gravity is [0, 0, 9.81] in World (Standard Z-Up).
+        const g_world: Vec3 = { x: 0, y: 0, z: this.GRAVITY };
         let acc_net = Vec3Math.sub(acc_world, g_world);
 
         // --- STEP 4: PHYSICS INTEGRATION (Double Integration) ---
@@ -335,8 +351,13 @@ export class TrajectoryService {
         });
 
         // Debug Logs
-        if (this.path.length % 100 === 0) {
-            // const v_mag = ...
+        if (this.path.length % 20 === 0) {
+            console.log(`[Hybrid] ${isStat ? '🛑' : '🚀'} | ` +
+                `Beta:${this.path.length < 200 ? '2.5' : '0.1'} | ` +
+                `Az:${a_meas.z.toFixed(2)} | ` +
+                `NetZ:${acc_net.z.toFixed(2)} | ` +
+                `Vz:${this.v.z.toFixed(3)} | ` +
+                `Pz:${this.p.z.toFixed(3)}`);
         }
 
         if (!this.realtimeEnabled) {
@@ -348,10 +369,16 @@ export class TrajectoryService {
             };
         }
 
+        // --- CORRECCIÓN VISUAL PARA LA UI ---
+        // Como invertimos la gravedad para la física, el cubo se ve al revés.
+        // Rotamos 180 grados en X para corregirlo visualmente sin afectar los cálculos.
+        // Q_rot_180_X = [0, 1, 0, 0] (w, x, y, z)
+        const q_visual = QuatMath.multiply(this.q, { w: 0, x: 1, y: 0, z: 0 });
+
         const point: TrajectoryPoint = {
             timestamp: t,
             position: { ...this.p },
-            rotation: { ...this.q },
+            rotation: q_visual, // <--- ÚNICO CAMBIO: Enviar q_visual en vez de this.q
             relativePosition: relP
         };
         this.path.push(point);
@@ -407,8 +434,8 @@ export class TrajectoryService {
         const norm = Math.sqrt(ax * ax + ay * ay + az * az);
         if (norm === 0) return QuatMath.identity();
 
-        // Inversión de ejes para alinear "Gravedad" con "Abajo"
-        const u = { x: -ax / norm, y: -ay / norm, z: -az / norm };
+
+        const u = { x: ax / norm, y: ay / norm, z: az / norm };
 
         // Queremos R(q) * u = [0,0,1]
         const crossX = u.y;
@@ -460,6 +487,129 @@ export class TrajectoryService {
 
     // --- Stub Methods for Compatibility ---
     public isOnGround() { return this.isStationary() && Math.abs(this.p.z) < 0.15; }
+
+    // =================================================================
+    // POST-PROCESSING & VBT METRICS (Restoring lost functionality)
+    // =================================================================
+
+    /**
+     * Apply offline corrections to raw data buffer (ZUPT + Boundary Condition)
+     */
+    applyPostProcessingCorrections() {
+        if (this.rawDataBuffer.length < 10) {
+            console.warn('[POST-PROC] Insufficient data for corrections');
+            return;
+        }
+
+        const N = this.rawDataBuffer.length;
+        console.log('[POST-PROC] Starting Corrections on ' + N + ' samples...');
+
+        // STEP 0: Analyze raw data
+        const v_final = this.rawDataBuffer[N - 1].v_raw;
+
+        // STEP 1: ZUPT - Force zero velocity at start and end
+        // Distribute velocity error linearly across the set
+        for (let i = 0; i < N; i++) {
+            const ratio = i / (N - 1);
+            this.rawDataBuffer[i].v_raw = {
+                x: this.rawDataBuffer[i].v_raw.x - (v_final.x * ratio),
+                y: this.rawDataBuffer[i].v_raw.y - (v_final.y * ratio),
+                z: this.rawDataBuffer[i].v_raw.z - (v_final.z * ratio)
+            };
+        }
+
+        // STEP 2: Re-integrate position with corrected velocity
+        this.rawDataBuffer[0].p_raw = Vec3Math.zero(); // Start at origin
+
+        for (let i = 1; i < N; i++) {
+            const dt = (this.rawDataBuffer[i].timestamp - this.rawDataBuffer[i - 1].timestamp) / 1000.0;
+            // Trapezoidal integration for better accuracy
+            const v_avg = {
+                x: (this.rawDataBuffer[i].v_raw.x + this.rawDataBuffer[i - 1].v_raw.x) / 2,
+                y: (this.rawDataBuffer[i].v_raw.y + this.rawDataBuffer[i - 1].v_raw.y) / 2,
+                z: (this.rawDataBuffer[i].v_raw.z + this.rawDataBuffer[i - 1].v_raw.z) / 2
+            };
+
+            this.rawDataBuffer[i].p_raw = {
+                x: this.rawDataBuffer[i - 1].p_raw.x + v_avg.x * dt,
+                y: this.rawDataBuffer[i - 1].p_raw.y + v_avg.y * dt,
+                z: this.rawDataBuffer[i - 1].p_raw.z + v_avg.z * dt
+            };
+        }
+
+        // STEP 3: BOUNDARY - Force return to origin (p_final = p_initial = 0)
+        const p_final_drift = this.rawDataBuffer[N - 1].p_raw;
+
+        // Distribute position drift error linearly
+        for (let i = 1; i < N; i++) {
+            const ratio = i / (N - 1);
+            this.rawDataBuffer[i].p_raw = {
+                x: this.rawDataBuffer[i].p_raw.x - (p_final_drift.x * ratio),
+                y: this.rawDataBuffer[i].p_raw.y - (p_final_drift.y * ratio),
+                z: this.rawDataBuffer[i].p_raw.z - (p_final_drift.z * ratio)
+            };
+        }
+
+        console.log('[POST-PROC] Corrections Complete.');
+
+        // Calculate VBT metrics using the cleaned data
+        this.calculateVBTMetrics();
+
+        // Update the main path array so the UI graph updates
+        this.updatePathWithCorrectedData();
+    }
+
+    /**
+     * Calculate VBT (Velocity-Based Training) metrics
+     */
+    private calculateVBTMetrics() {
+        if (this.rawDataBuffer.length < 10) return;
+
+        console.log('[VBT] Calculating Metrics...');
+
+        // Determine vertical axis based on movement range
+        // (Simple heuristic: axis with largest variance)
+        // Or assume Z since we rotated to World Frame? 
+        // In our Hybrid code, we rotate to World, so Vertical is ALWAYS Z.
+        // But we kept the 'verticalAxis' property, let's use Z.
+
+        let v_vertical_max = 0;
+        let v_vertical_sum = 0;
+        let count_propulsive = 0;
+        let concentric_time = 0;
+
+        // Simple Concentric Phase detection: Velocity > 0 (Upward)
+        // Since we align gravity to -Z, Up is +Z.
+
+        for (let i = 0; i < this.rawDataBuffer.length; i++) {
+            const velZ = this.rawDataBuffer[i].v_raw.z;
+
+            if (velZ > 0.05) { // Threshold 0.05 m/s
+                if (velZ > v_vertical_max) v_vertical_max = velZ;
+                v_vertical_sum += velZ;
+                count_propulsive++;
+            }
+        }
+
+        const mpv = count_propulsive > 0 ? v_vertical_sum / count_propulsive : 0;
+
+        console.log(`[VBT] Peak Velocity: ${v_vertical_max.toFixed(3)} m/s`);
+        console.log(`[VBT] Mean Propulsive Velocity: ${mpv.toFixed(3)} m/s`);
+    }
+
+    /**
+     * Update this.path[] with corrected data from rawDataBuffer
+     */
+    private updatePathWithCorrectedData() {
+        this.path = this.rawDataBuffer.map(sample => ({
+            timestamp: sample.timestamp,
+            position: { ...sample.p_raw },
+            rotation: { ...sample.q },
+            relativePosition: { ...sample.p_raw } // Relative to origin (0,0,0)
+        }));
+
+        console.log(`[POST-PROC] Updated path[] with ${this.path.length} corrected samples`);
+    }
 }
 
 export const trajectoryService = new TrajectoryService();
