@@ -1,19 +1,41 @@
 /**
- * Hybrid Trajectory Service: Madgwick (Orientation) + Integrated Physics (Navigation)
- * 
- * Architecture:
- * 1. Orientation: Madgwick Filter (Gradient Descent) -> Smooth 3D Visualization
- * 2. Position/Velocity: Strapdown Integration with ZUPT & Zero-Clamp safeguards
- * 
- * This approach decouples visualization smoothness from physics integration errors.
+ * Hybrid Trajectory Service: Stabilized & Visually Corrected
+ *
+ * This service fuses inertial measurements (accelerometer and gyroscope)
+ * into a 3D orientation estimate (using a Madgwick filter) and a 3D
+ * position estimate (using a simple per-axis Kalman filter with bias
+ * estimation). The service is designed for a strength‑training bar
+ * tracking application where the sensor may be mounted at an arbitrary
+ * orientation on the bar. It provides real‑time kinematics for UI
+ * rendering and records raw data for offline analysis.
+ *
+ * Key design points:
+ * 1. Physics world frame is Z‑up. UI world frame is Y‑up (via a fixed
+ *    rotation applied at the end).
+ * 2. Orientation is estimated with the Madgwick filter. A small beta
+ *    value is used for smoothness. When the bar is detected as
+ *    stationary for >0.5 s, pitch/roll are re‑aligned with gravity
+ *    while preserving the current yaw.
+ * 3. Position is estimated independently along each axis with a
+ *    3‑state Kalman filter [position, velocity, accelerometer bias].
+ *    When the bar is stationary, ZUPT (Zero Velocity Update) and a
+ *    bias update are applied.
+ * 4. A fixed mount rotation can be applied to convert from the sensor
+ *    coordinate frame to the bar coordinate frame. By default this is
+ *    the identity (no rotation) but can be set via setMountRotation().
+ * 5. Stationary detection uses a sliding window of the last ~250 ms
+ *    worth of accelerometer and gyroscope magnitudes. Both the mean
+ *    and standard deviation of these magnitudes are thresholded
+ *    independently, with hysteresis on entry/exit.
+ * 6. Extensive console logging is included (throttled) to aid in
+ *    debugging. Logs report dt, acceleration magnitudes, linear
+ *    acceleration, velocity, position and stationary state.
  */
 
 import { IMUSample } from '../ble/constants';
-import { Mat3 } from './Mat3';
 import { Vec3, Vec3Math } from './Vec3';
 import { Quaternion, QuatMath } from './QuaternionMath';
 
-// Types covering the older service API
 export interface TrajectoryPoint {
     timestamp: number;
     position: Vec3;
@@ -22,594 +44,743 @@ export interface TrajectoryPoint {
 }
 
 /**
- * Standard Madgwick AHRS implementation
- * Source ideas: https://x-io.co.uk/open-source-imu-and-ahrs-algorithms/
+ * Simple 3‑state Kalman filter for a single axis: position (p),
+ * velocity (v) and accelerometer bias (b). The model assumes constant
+ * acceleration between samples. When the axis is stationary a ZUPT
+ * observation is applied (velocity is zero) along with a bias
+ * observation (linear acceleration should be zero). Process and
+ * measurement noise values were tuned empirically; adjust Q and R
+ * values below as necessary.
+ */
+class KalmanFilter1D {
+    // State x = [p, v, b]
+    private x: number[] = [0, 0, 0];
+    // Covariance matrix P (3×3)
+    private P: number[][] = [
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+    ];
+    // Process noise Q (tune these to control how much the state can drift)
+    private Q: number[][] = [
+        [1e-5, 0, 0],    // position noise
+        [0, 1e-4, 0],    // velocity noise
+        [0, 0, 1e-6],    // bias noise (random walk)
+    ];
+    // Measurement noise (tune for ZUPT/bias updates)
+    private R_v: number = 0.001; // velocity measurement noise
+    private R_b: number = 0.01;  // bias measurement noise
+
+    /** Reset the filter state and covariance. */
+    reset() {
+        this.x = [0, 0, 0];
+        this.P = [
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 0.1],
+        ];
+    }
+
+    /** Predict step: integrate acceleration (minus bias) for dt seconds. */
+    predict(acc_in: number, dt: number) {
+        if (dt <= 0) return;
+        const [p, v, b] = this.x;
+        const acc_eff = acc_in - b;
+        // State prediction
+        this.x[0] = p + v * dt + 0.5 * acc_eff * dt * dt;
+        this.x[1] = v + acc_eff * dt;
+        this.x[2] = b;
+        // Jacobian F
+        const F = [
+            [1, dt, -0.5 * dt * dt],
+            [0, 1, -dt],
+            [0, 0, 1],
+        ];
+        // P = F P F^T + Q
+        const P = this.P;
+        const FP: number[][] = [
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ];
+        // FP = F * P
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                FP[i][j] = F[i][0] * P[0][j] + F[i][1] * P[1][j] + F[i][2] * P[2][j];
+            }
+        }
+        const P_next: number[][] = [
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ];
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                // F^T: F[j][i]
+                P_next[i][j] = FP[i][0] * F[j][0] + FP[i][1] * F[j][1] + FP[i][2] * F[j][2] + this.Q[i][j];
+            }
+        }
+        this.P = P_next;
+    }
+
+    /**
+     * ZUPT + bias update when stationary. First we observe v = 0,
+     * then b = acc_net (approx linear acceleration equals bias).
+     */
+    updateZUPT(acc_linear_in: number) {
+        // 1) velocity measurement v = 0
+        this.scalarUpdate(1, 0, this.R_v);
+        // 2) bias measurement b = acc_linear_in
+        this.scalarUpdate(2, acc_linear_in, this.R_b);
+    }
+
+    /**
+     * Scalar measurement update on state index `stateIdx` with
+     * measurement `measurement` and measurement noise `noiseR`.
+     */
+    private scalarUpdate(stateIdx: number, measurement: number, noiseR: number) {
+        const y = measurement - this.x[stateIdx];
+        const S = this.P[stateIdx][stateIdx] + noiseR;
+        const K = [
+            this.P[0][stateIdx] / S,
+            this.P[1][stateIdx] / S,
+            this.P[2][stateIdx] / S,
+        ];
+        // Update state
+        this.x[0] += K[0] * y;
+        this.x[1] += K[1] * y;
+        this.x[2] += K[2] * y;
+        // Update covariance
+        const P_new: number[][] = [
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ];
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                P_new[i][j] = this.P[i][j] - K[i] * this.P[stateIdx][j];
+            }
+        }
+        this.P = P_new;
+    }
+
+    getPosition() { return this.x[0]; }
+    getVelocity() { return this.x[1]; }
+    getBias() { return this.x[2]; }
+}
+
+/**
+ * Madgwick orientation filter. A slightly higher beta (0.033) is used
+ * compared to the original code to allow the filter to converge
+ * reasonably fast while still smoothing noise.
  */
 class Madgwick {
     public q: Quaternion = { w: 1, x: 0, y: 0, z: 0 };
     private beta: number;
-    private sampleFreq: number;
 
-    constructor(sampleFreq: number = 200.0, beta: number = 0.1) {
-        this.sampleFreq = sampleFreq;
+    constructor(beta: number = 0.033) {
         this.beta = beta;
     }
 
-    public setQuaternion(q: Quaternion) {
-        this.q = { ...q };
-    }
+    setQuaternion(q: Quaternion) { this.q = { ...q }; }
 
-    public setBeta(newBeta: number) {
-        this.beta = newBeta;
-    }
-
-    public update(gx: number, gy: number, gz: number, ax: number, ay: number, az: number) {
+    update(gx: number, gy: number, gz: number, ax: number, ay: number, az: number, dt: number) {
         let q1 = this.q.w, q2 = this.q.x, q3 = this.q.y, q4 = this.q.z;
         const normRecip = (n: number) => (n === 0 ? 0 : 1 / Math.sqrt(n));
 
-        // Rate of change of quaternion from gyroscope
         let qDot1 = 0.5 * (-q2 * gx - q3 * gy - q4 * gz);
         let qDot2 = 0.5 * (q1 * gx + q3 * gz - q4 * gy);
         let qDot3 = 0.5 * (q1 * gy - q2 * gz + q4 * gx);
         let qDot4 = 0.5 * (q1 * gz + q2 * gy - q3 * gx);
 
-        // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
         if (!((ax === 0.0) && (ay === 0.0) && (az === 0.0))) {
-            // Normalise accelerometer measurement
             let recipNorm = normRecip(ax * ax + ay * ay + az * az);
-            ax *= recipNorm;
-            ay *= recipNorm;
-            az *= recipNorm;
+            ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
 
-            // Auxiliary variables to avoid repeated arithmetic
-            let _2q1 = 2.0 * q1;
-            let _2q2 = 2.0 * q2;
-            let _2q3 = 2.0 * q3;
-            let _2q4 = 2.0 * q4;
-            let _4q1 = 4.0 * q1;
-            let _4q2 = 4.0 * q2;
-            let _4q3 = 4.0 * q3;
-            let _8q2 = 8.0 * q2;
-            let _8q3 = 8.0 * q3;
-            let q1q1 = q1 * q1;
-            let q2q2 = q2 * q2;
-            let q3q3 = q3 * q3;
-            let q4q4 = q4 * q4;
+            const _2q1 = 2.0 * q1;
+            const _2q2 = 2.0 * q2;
+            const _2q3 = 2.0 * q3;
+            const _2q4 = 2.0 * q4;
+            const _4q1 = 4.0 * q1;
+            const _4q2 = 4.0 * q2;
+            const _4q3 = 4.0 * q3;
+            const _8q2 = 8.0 * q2;
+            const _8q3 = 8.0 * q3;
+            const q1q1 = q1 * q1;
+            const q2q2 = q2 * q2;
+            const q3q3 = q3 * q3;
+            const q4q4 = q4 * q4;
 
-            // Gradient decent algorithm corrective step
             let s1 = _4q1 * q3q3 + _2q3 * ax + _4q1 * q2q2 - _2q2 * ay;
             let s2 = _4q2 * q4q4 - _2q4 * ax + 4.0 * q1q1 * q2 - _2q1 * ay - _4q2 + _8q2 * q2q2 + _8q2 * q3q3 + _4q2 * az;
             let s3 = 4.0 * q1q1 * q3 + _2q1 * ax + _4q3 * q4q4 - _2q4 * ay - _4q3 + _8q3 * q2q2 + _8q3 * q3q3 + _4q3 * az;
             let s4 = 4.0 * q2q2 * q4 - _2q2 * ax + 4.0 * q3q3 * q4 - _2q3 * ay;
 
-            recipNorm = normRecip(s1 * s1 + s2 * s2 + s3 * s3 + s4 * s4); // normalise step magnitude
-            s1 *= recipNorm;
-            s2 *= recipNorm;
-            s3 *= recipNorm;
-            s4 *= recipNorm;
+            recipNorm = normRecip(s1 * s1 + s2 * s2 + s3 * s3 + s4 * s4);
+            s1 *= recipNorm; s2 *= recipNorm; s3 *= recipNorm; s4 *= recipNorm;
 
-            // Apply feedback step
             qDot1 -= this.beta * s1;
             qDot2 -= this.beta * s2;
             qDot3 -= this.beta * s3;
             qDot4 -= this.beta * s4;
         }
 
-        // Integrate to yield quaternion
-        const dt = 1.0 / this.sampleFreq; // Approx, or pass dynamic dt
         q1 += qDot1 * dt;
         q2 += qDot2 * dt;
         q3 += qDot3 * dt;
         q4 += qDot4 * dt;
 
-        // Normalise quaternion
-        let recipNorm = normRecip(q1 * q1 + q2 * q2 + q3 * q3 + q4 * q4);
+        const recipNorm = normRecip(q1 * q1 + q2 * q2 + q3 * q3 + q4 * q4);
         this.q.w = q1 * recipNorm;
         this.q.x = q2 * recipNorm;
         this.q.y = q3 * recipNorm;
         this.q.z = q4 * recipNorm;
     }
-
-    // Allow dynamic update with exact dt if available
-    public updateWithDt(gx: number, gy: number, gz: number, ax: number, ay: number, az: number, dt: number) {
-        // Temporary override of sampleFreq logic for exact dt
-        const oldFreq = this.sampleFreq;
-        if (dt > 0) this.sampleFreq = 1.0 / dt;
-        this.update(gx, gy, gz, ax, ay, az);
-        this.sampleFreq = oldFreq; // restore
-    }
 }
 
 export class TrajectoryService {
-    // --- Nominal State ---
+    // Position, velocity and orientation (sensor->world)
     private p: Vec3 = { x: 0, y: 0, z: 0 };
     private v: Vec3 = { x: 0, y: 0, z: 0 };
     private q: Quaternion = { w: 1, x: 0, y: 0, z: 0 };
-
-    // --- Madgwick Filter ---
-    // Beta: larger = faster convergence/more noise, smaller = smoother/more drift
-    // 0.1 is standard. 0.033 is very smooth.
-    // We use a relatively high beta (0.1) for gym movements which are dynamic.
-    private madgwick: Madgwick = new Madgwick(100, 0.1);
-
-    // --- Biases (Still kept for Gyro correction if needed, but Madgwick handles some drift) ---
-    private ab: Vec3 = { x: 0, y: 0, z: 0 };
-    private gb: Vec3 = { x: 0, y: 0, z: 0 };
-
-    // --- Constants ---
+    // Fixed mount rotation (bar->sensor). Default identity (no rotation).
+    private q_mount: Quaternion = { w: 1, x: 0, y: 0, z: 0 };
+    // Per‑axis Kalman filters
+    private kX: KalmanFilter1D = new KalmanFilter1D();
+    private kY: KalmanFilter1D = new KalmanFilter1D();
+    private kZ: KalmanFilter1D = new KalmanFilter1D();
+    // Orientation filter
+    private madgwick: Madgwick = new Madgwick(0.033);
+    // Gravity magnitude (m/s^2)
     private readonly GRAVITY = 9.81;
-
-    // ZUPT Detection
-    private readonly BUFFER_SIZE = 250;
+    // Sampling rate expectation (Hz). Determines buffer size for
+    // stationary detection. Default 1000 Hz.
+    private expectedHz: number = 1000;
+    // Sliding window size (number of samples) for stationary detection
+    private bufferSize: number = 250; // Default for 1000 Hz @ 250ms window
+    // Buffers to hold recent accelerometer and gyro magnitudes
     private accelBuffer: number[] = [];
     private gyroBuffer: number[] = [];
-
-    // State
-    private isCalibrating = false;
-    private calibrationBuffer: IMUSample[] = [];
-    private lastTimestamp = 0;
-    private path: TrajectoryPoint[] = [];
-    private isOrientationInitialized = false;
-
-    // Repetition tracking
-    private baselineP: Vec3 = { x: 0, y: 0, z: 0 };
-
-    // Raw Data Buffer
+    // Stationary detection state and timers
+    private stationaryTick: number = 0;
+    private movingTick: number = 0;
+    private isStatState: boolean = false;
+    // Logging counter to throttle console output
+    private logCounter: number = 0;
+    // Raw data buffer for offline post‑processing
     private rawDataBuffer: Array<any> = [];
+    // Last timestamp processed (ms)
+    private lastTimestamp: number = 0;
+    // Path of computed points for UI
+    private path: TrajectoryPoint[] = [];
+    // Last emitted point (for hold cases)
+    private lastPoint: TrajectoryPoint | null = null;
+    // Calibration state and buffer
+    private isCalibrating: boolean = false;
+    private calibrationBuffer: IMUSample[] = [];
+    // Orientation initialisation flag
+    private isOrientationInitialized: boolean = false;
+    // Baseline position for relative position calculation
+    private baselineP: Vec3 = { x: 0, y: 0, z: 0 };
+    // Real‑time streaming flag: if false, path is not updated and zero
+    private realtimeEnabled: boolean = false;
 
-    // Record-Only Mode
-    private realtimeEnabled = false;
-
-    constructor() {
+    constructor(expectedHz: number = 1000) {
+        this.setExpectedHz(expectedHz);
         this.reset();
     }
 
     /**
-     * FULL RESET
+     * Set the expected sampling rate (Hz). This affects the stationary
+     * detection window. Call before reset().
      */
-    reset() {
+    public setExpectedHz(hz: number) {
+        this.expectedHz = Math.max(10, hz);
+        this.bufferSize = Math.max(10, Math.round(this.expectedHz * 0.25));
+    }
+
+    /**
+     * Set a fixed mount rotation from bar frame to sensor frame. If the
+     * sensor is mounted such that its axes do not align with the bar
+     * axes, supply the orientation of the bar relative to the sensor.
+     * This rotation will be applied when computing the bar's orientation
+     * for display. The provided quaternion will be normalized.
+     */
+    public setMountRotation(q: Quaternion) {
+        this.q_mount = QuatMath.normalize(q);
+    }
+
+    /** Fully reset the service state. Position and velocity are zeroed,
+     * orientation reset, kalman filters reset, and buffers cleared. Raw
+     * data buffer is preserved across resets to enable offline analysis.
+     */
+    public reset() {
         console.log('[Hybrid] Full Reset...');
         this.p = Vec3Math.zero();
         this.v = Vec3Math.zero();
-        this.q = QuatMath.identity();
-
-        // Reset Madgwick
-        this.madgwick = new Madgwick(100, 0.1);
-
-        this.ab = Vec3Math.zero();
-        this.gb = Vec3Math.zero();
-
-        this.path = [];
+        this.q = { w: 1, x: 0, y: 0, z: 0 };
+        this.madgwick = new Madgwick(0.033);
+        this.kX.reset();
+        this.kY.reset();
+        this.kZ.reset();
+        this.isOrientationInitialized = false;
         this.lastTimestamp = 0;
+        this.path = [];
+        this.lastPoint = null;
         this.accelBuffer = [];
         this.gyroBuffer = [];
-        this.baselineP = { x: 0, y: 0, z: 0 };
-        this.isOrientationInitialized = false;
-        this.isCalibrating = false;
-        this.calibrationBuffer = [];
+        // Do NOT clear rawDataBuffer here; keep accumulated data for analysis
+        this.baselineP = Vec3Math.zero();
+        this.stationaryTick = 0;
+        this.movingTick = 0;
+        this.isStatState = false;
     }
 
-    resetKinematics() {
-        console.log('[Hybrid] Kinematic Reset (biases preserved)...');
+    /** Reset only the kinematic state (position, velocity, kalman) while
+     * preserving the raw data buffer and mount rotation. This is
+     * invoked automatically when a large gap in timestamps is
+     * encountered or when calibration completes.
+     */
+    public resetKinematics() {
         this.p = Vec3Math.zero();
         this.v = Vec3Math.zero();
         this.path = [];
+        this.lastPoint = null;
+        this.baselineP = Vec3Math.zero();
+        this.kX.reset();
+        this.kY.reset();
+        this.kZ.reset();
         this.accelBuffer = [];
         this.gyroBuffer = [];
-        this.rawDataBuffer = [];
-        this.baselineP = { x: 0, y: 0, z: 0 };
-        // We DO NOT reset Madgwick here to keep orientation continuity.
-        console.log('[Hybrid] Ready for new rep');
+        this.stationaryTick = 0;
+        this.movingTick = 0;
+        this.isStatState = false;
+        console.log('[Hybrid] Kinematics Reset');
     }
 
-    // --- Main Loop ---
-    processSample(sample: IMUSample): TrajectoryPoint {
+    /** Process a single IMU sample. Returns a TrajectoryPoint for
+     * rendering. If realtimeEnabled is false, relative position and
+     * position are always zero to avoid moving the UI. However,
+     * internal integration and raw data recording still occur. */
+    public processSample(sample: IMUSample): TrajectoryPoint {
         const t = sample.timestampMs;
-
-        // Calibration Mode
+        // During calibration, just collect samples and return a
+        // placeholder. Calibration will set orientation later.
         if (this.isCalibrating) {
             this.calibrationBuffer.push(sample);
-            return {
-                timestamp: t,
-                position: Vec3Math.zero(),
-                rotation: QuatMath.identity(),
-                relativePosition: Vec3Math.zero()
-            };
-        }
-
-        // --- Hot Start: Initialize Orientation from Gravity ---
-        if (this.lastTimestamp === 0) {
-            this.lastTimestamp = t;
-            if (!this.isOrientationInitialized) {
-                const a_init = { x: sample.ax * 9.81, y: sample.ay * 9.81, z: sample.az * 9.81 };
-                // Calculate initial Q aligned to gravity
-                const qInit = this.getRotationFromGravity(a_init.x, a_init.y, a_init.z);
-                this.q = qInit;
-                // Inject into Madgwick so it starts converged
-                this.madgwick.setQuaternion(qInit);
-
-                this.isOrientationInitialized = true;
-                console.log('[Hybrid] Hot Start: Madgwick Seeded from Gravity.');
-            }
-            return {
+            const out: TrajectoryPoint = {
                 timestamp: t,
                 position: Vec3Math.zero(),
                 rotation: { ...this.q },
-                relativePosition: Vec3Math.zero()
+                relativePosition: Vec3Math.zero(),
             };
+            this.lastPoint = out;
+            return out;
         }
 
-        const dt = (t - this.lastTimestamp) / 1000.0;
-        if (dt <= 0) return this.getLastPoint();
-        this.lastTimestamp = t;
-
-        // =============================================================
-        // CORRECCIÓN VISUAL: "Turbo Boost" para arranque rápido
-        // =============================================================
-        // Si llevamos pocos samples (ej. < 200, aprox 2 segundos), 
-        // usamos un Beta agresivo para que el cubo se enderece rápido.
-        // Luego pasamos a modo suave para filtrar vibraciones.
-        if (this.path.length < 200) {
-            this.madgwick.setBeta(2.5); // Modo Rápido (corrige en <0.5s)
-        } else {
-            this.madgwick.setBeta(0.1); // Modo Suave (estándar)
-        }
-        // =============================================================
-
-        // 1. Raw Measurements (Physical Units)
+        // Convert raw sample to m/s^2 and rad/s
         const a_meas: Vec3 = {
-            x: sample.ax * 9.81,
-            y: sample.ay * 9.81,
-            z: sample.az * 9.81
+            x: sample.ax * this.GRAVITY,
+            y: sample.ay * this.GRAVITY,
+            z: sample.az * this.GRAVITY,
         };
         const w_meas: Vec3 = {
             x: sample.gx * (Math.PI / 180),
             y: sample.gy * (Math.PI / 180),
-            z: sample.gz * (Math.PI / 180)
+            z: sample.gz * (Math.PI / 180),
         };
 
-        // 1.1 Update Stationary Detection Buffers
-        this.updateBuffers(a_meas, w_meas);
-
-        // 1.2 Detect Stationary State
-        const isStat = this.isStationary();
-
-        // --- STEP 1: UPDATE ORIENTATION (MADGWICK) ---
-        // Madgwick expects Rad/s and G (or consistent units). 
-        // We pass Rad/s and m/s^2. Madgwick implementation normalizes Accel, so magnitude doesn't matter, only direction.
-        // We use the RAW measurements (Madgwick generally handles biases implicitly via Beta, or we could bias-correct first).
-        // Let's bias-correct Gyro if we have gb, but Madgwick is robust.
-        // For now, let's pass a_meas and w_meas directly (or w_meas - gb).
-        // Given we don't strictly calibrate gb anymore in this simple version, raw is fine.
-        this.madgwick.updateWithDt(w_meas.x, w_meas.y, w_meas.z, a_meas.x, a_meas.y, a_meas.z, dt);
-
-        // SYNC: Take quaternion from Madgwick
-        this.q = { ...this.madgwick.q };
-
-        // --- STEP 2: PREPARE PHYSICS ---
-
-        // Correction 1: Stationay Lock Pre-Calculation (Snapshot)
-        const prevPosition = { ...this.p };
-
-        // --- STEP 3: ROTATE ACCELERATION / GRAVITY REMOVAL ---
-
-        // A. Remove Bias (Standard simple bias subtraction if we had it)
-        // const a_hat = Vec3Math.sub(a_meas, this.ab);
-        const a_hat = a_meas; // Using raw for now as AB is 0.
-
-        // B. Rotate to World Frame
-        const R = QuatMath.toRotationMatrix(this.q);
-        const acc_world = R.multiplyVec(a_hat);
-
-        // C. Subtract Gravity
-        // Model: Gravity is [0, 0, 9.81] in World (Standard Z-Up).
-        const g_world: Vec3 = { x: 0, y: 0, z: this.GRAVITY };
-        let acc_net = Vec3Math.sub(acc_world, g_world);
-
-        // --- STEP 4: PHYSICS INTEGRATION (Double Integration) ---
-
-        // Safeguard: Gravity Leakage Clamp (User's Logic)
-        const a_mag = Math.sqrt(a_meas.x ** 2 + a_meas.y ** 2 + a_meas.z ** 2);
-        const net_mag = Math.sqrt(acc_net.x ** 2 + acc_net.y ** 2 + acc_net.z ** 2);
-
-        // If sensor says 1G (static) but math says specific force > 2.0 (moving), it's an artifact.
-        if (Math.abs(a_mag - 9.81) < 1.0 && net_mag > 2.0) {
-            acc_net = { x: 0, y: 0, z: 0 };
-            // Note: We don't integrate in this branch, effectively suppressing the spike.
-        }
-
-        // Standard Integration: p = p + v*dt + 0.5*a*dt^2
-        if (!isStat) {
-            this.p = Vec3Math.add(this.p, Vec3Math.add(Vec3Math.scale(this.v, dt), Vec3Math.scale(acc_net, 0.5 * dt * dt)));
-            this.v = Vec3Math.add(this.v, Vec3Math.scale(acc_net, dt));
-        }
-
-        // --- STEP 5: SAFEGUARDS (STATIONARY LOCKS) ---
-        if (isStat) {
-            // A. Force Net Accel to Zero (Clean Buffer)
-            acc_net = { x: 0, y: 0, z: 0 };
-
-            // B. Snapshot Lock: Restore position to prevent creep
-            this.p = prevPosition;
-
-            // C. Zero Velocity (Hard ZUPT)
-            this.v = { x: 0, y: 0, z: 0 };
-        }
-
-        // Relative position
-        const relP = Vec3Math.sub(this.p, this.baselineP);
-
-        // Capture Raw Data
-        this.rawDataBuffer.push({
-            timestamp: t,
-            acc_net,
-            acc_world,
-            w_meas,
-            q: { ...this.q },
-            p_raw: { ...this.p },
-            v_raw: { ...this.v }
-        });
-
-        // Debug Logs
-        if (this.path.length % 20 === 0) {
-            console.log(`[Hybrid] ${isStat ? '🛑' : '🚀'} | ` +
-                `Beta:${this.path.length < 200 ? '2.5' : '0.1'} | ` +
-                `Az:${a_meas.z.toFixed(2)} | ` +
-                `NetZ:${acc_net.z.toFixed(2)} | ` +
-                `Vz:${this.v.z.toFixed(3)} | ` +
-                `Pz:${this.p.z.toFixed(3)}`);
-        }
-
-        if (!this.realtimeEnabled) {
-            return {
+        // Initialize orientation using either calibration buffer or the
+        // first sample. We require at least one sample of data to
+        // determine gravity. If orientation is already initialized,
+        // skip this block.
+        if (!this.isOrientationInitialized) {
+            this.lastTimestamp = t;
+            let qInit: Quaternion;
+            // If calibrationBuffer contains data, compute average accel
+            if (this.calibrationBuffer.length > 0) {
+                let sumAx = 0, sumAy = 0, sumAz = 0;
+                for (const s of this.calibrationBuffer) {
+                    sumAx += s.ax * this.GRAVITY;
+                    sumAy += s.ay * this.GRAVITY;
+                    sumAz += s.az * this.GRAVITY;
+                }
+                const n = this.calibrationBuffer.length;
+                const avgAx = sumAx / n;
+                const avgAy = sumAy / n;
+                const avgAz = sumAz / n;
+                qInit = this.getRotationFromGravity(avgAx, avgAy, avgAz);
+                console.log('[Hybrid] Initial orientation computed from calibration buffer');
+                // Clear calibration buffer after use
+                this.calibrationBuffer = [];
+            } else {
+                // Fallback: single sample init
+                qInit = this.getRotationFromGravity(a_meas.x, a_meas.y, a_meas.z);
+                console.log('[Hybrid] Hot Start executed on first sample');
+            }
+            this.q = qInit;
+            this.madgwick.setQuaternion(qInit);
+            this.isOrientationInitialized = true;
+            // Reset kinematics when orientation is initialised to avoid
+            // integrating stale data. Preserve raw data buffer.
+            this.resetKinematics();
+            const out: TrajectoryPoint = {
                 timestamp: t,
                 position: Vec3Math.zero(),
                 rotation: { ...this.q },
-                relativePosition: Vec3Math.zero()
+                relativePosition: Vec3Math.zero(),
             };
+            this.lastPoint = out;
+            return out;
         }
 
-        // --- CORRECCIÓN VISUAL PARA LA UI ---
-        // Como invertimos la gravedad para la física, el cubo se ve al revés.
-        // Rotamos 180 grados en X para corregirlo visualmente sin afectar los cálculos.
-        // Q_rot_180_X = [0, 1, 0, 0] (w, x, y, z)
-        const q_visual = QuatMath.multiply(this.q, { w: 0, x: 1, y: 0, z: 0 });
+        // Compute dt (s) from timestamp differences
+        let dt = (t - this.lastTimestamp) / 1000.0;
+        this.lastTimestamp = t;
+
+        // Invalid or duplicate sample
+        if (dt <= 0) {
+            return this.getLastPoint(t);
+        }
+
+        // If dt is suspiciously large (>0.2 s), reset kinematics and
+        // require reinitialisation of orientation on next sample. A
+        // connection drop or pause likely occurred.
+        if (dt > 0.2) {
+            console.warn(`[Hybrid] Large gap detected (${dt.toFixed(3)} s). Resetting kinematics.`);
+            this.resetKinematics();
+            this.isOrientationInitialized = false;
+            const out: TrajectoryPoint = {
+                timestamp: t,
+                position: Vec3Math.zero(),
+                rotation: { ...this.q },
+                relativePosition: Vec3Math.zero(),
+            };
+            this.lastPoint = out;
+            return out;
+        }
+
+        // If dt is moderately large (>50 ms) but not huge, we simply
+        // hold the last point. We do not integrate orientation or
+        // kinematics in this window to avoid jumps.
+        if (dt > 0.05) {
+            return this.getLastPoint(t);
+        }
+
+        // Update sliding buffers for stationary detection
+        this.updateBuffers(a_meas, w_meas);
+        const { isCandidate, metrics } = this.checkStationaryCandidate();
+        if (isCandidate) {
+            this.stationaryTick += dt;
+            this.movingTick = 0;
+        } else {
+            this.movingTick += dt;
+            this.stationaryTick = 0;
+        }
+        // Hysteresis: enter stationary after 300 ms; exit after 100 ms
+        if (!this.isStatState && this.stationaryTick > 0.3) {
+            this.isStatState = true;
+        } else if (this.isStatState && this.movingTick > 0.1) {
+            this.isStatState = false;
+        }
+        const isStat = this.isStatState;
+
+        // When stationary for >0.5 s, realign pitch/roll to gravity.  We
+        // preserve the current yaw while re‑aligning the measured
+        // gravity vector with the +Z axis. Since QuatMath does not
+        // expose a general axis‑angle constructor, construct a yaw
+        // quaternion manually.
+        if (isStat && this.stationaryTick > 0.5) {
+            const euler = this.toEuler(this.q);
+            const yaw = euler.z;
+            const halfYaw = yaw * 0.5;
+            const q_yaw = { w: Math.cos(halfYaw), x: 0, y: 0, z: Math.sin(halfYaw) } as Quaternion;
+            const q_gravity = this.getRotationFromGravity(a_meas.x, a_meas.y, a_meas.z);
+            // Compose yaw then gravity: q_new = q_yaw ⊗ q_gravity
+            const q_new = QuatMath.normalize(QuatMath.multiply(q_yaw, q_gravity));
+            this.q = q_new;
+            this.madgwick.setQuaternion(this.q);
+        }
+
+        // Update orientation with Madgwick
+        this.madgwick.update(w_meas.x, w_meas.y, w_meas.z, a_meas.x, a_meas.y, a_meas.z, dt);
+        this.q = { ...this.madgwick.q };
+
+        // Compute linear acceleration in world frame
+        // Rotate measured accel to world frame using sensor orientation
+        const R = QuatMath.toRotationMatrix(this.q);
+        const acc_world = R.multiplyVec(a_meas);
+        const g_vec = { x: 0, y: 0, z: this.GRAVITY };
+        const acc_net = Vec3Math.sub(acc_world, g_vec);
+
+        // Integrate kinematics via Kalman
+        if (!isStat) {
+            this.kX.predict(acc_net.x, dt);
+            this.kY.predict(acc_net.y, dt);
+            this.kZ.predict(acc_net.z, dt);
+        } else {
+            this.kX.predict(acc_net.x, dt); this.kX.updateZUPT(acc_net.x);
+            this.kY.predict(acc_net.y, dt); this.kY.updateZUPT(acc_net.y);
+            this.kZ.predict(acc_net.z, dt); this.kZ.updateZUPT(acc_net.z);
+        }
+
+        // Update position and velocity from Kalman filters
+        this.p = { x: this.kX.getPosition(), y: this.kY.getPosition(), z: this.kZ.getPosition() };
+        this.v = { x: this.kX.getVelocity(), y: this.kY.getVelocity(), z: this.kZ.getVelocity() };
+        const relP = Vec3Math.sub(this.p, this.baselineP);
+
+        // Record raw data for offline analysis
+        this.rawDataBuffer.push({ timestamp: t, acc_net, q: { ...this.q }, p_raw: { ...this.p }, v_raw: { ...this.v } });
+
+        // Throttled logging: every ~50 samples (~20 Hz at 1000 Hz ODR)
+        this.logCounter++;
+        if (this.logCounter % 50 === 0) {
+            const aMag = Math.sqrt(a_meas.x ** 2 + a_meas.y ** 2 + a_meas.z ** 2);
+            const accLinMag = Math.sqrt(acc_net.x ** 2 + acc_net.y ** 2 + acc_net.z ** 2);
+            console.log(
+                `[Hybrid] Stat:${isStat} dt:${dt.toFixed(4)} |a|:${aMag.toFixed(2)} |aLin|:${accLinMag.toFixed(3)} v:(${this.v.x.toFixed(3)},${this.v.y.toFixed(3)},${this.v.z.toFixed(3)}) p:(${this.p.x.toFixed(3)},${this.p.y.toFixed(3)},${this.p.z.toFixed(3)})`);
+            // Optional: log stationary metrics to debug detection
+            if (metrics.meanA !== undefined) {
+                console.log(
+                    `[Hybrid] StatMetrics meanA:${metrics.meanA.toFixed(2)} stdA:${metrics.stdA.toFixed(2)} meanW:${metrics.meanW.toFixed(3)} stdW:${metrics.stdW.toFixed(3)}`
+                );
+            }
+        }
+
+        // Build output point. If realtimeEnabled is false, return zeros to avoid moving UI.
+        // Compute bar orientation by applying mount rotation: q_bar_world = q_sensor_world ⊗ q_mount.
+        const q_bar_world = QuatMath.multiply(this.q, this.q_mount);
+        // Apply -90° rotation about X to convert Z‑up world to Y‑up UI.
+        const fix = { w: Math.SQRT1_2, x: -Math.SQRT1_2, y: 0, z: 0 };
+        const q_visual = QuatMath.normalize(QuatMath.multiply(fix, q_bar_world));
 
         const point: TrajectoryPoint = {
             timestamp: t,
             position: { ...this.p },
-            rotation: q_visual, // <--- ÚNICO CAMBIO: Enviar q_visual en vez de this.q
-            relativePosition: relP
+            rotation: q_visual,
+            relativePosition: relP,
         };
+
+        // Always update lastPoint even if not emitting to UI
+        this.lastPoint = point;
+
+        if (!this.realtimeEnabled) {
+            // Return zeroed position to UI while still updating internal state
+            return {
+                timestamp: t,
+                position: Vec3Math.zero(),
+                rotation: q_visual,
+                relativePosition: Vec3Math.zero(),
+            };
+        }
+
+        // Append to path for realtime UI
         this.path.push(point);
         return point;
     }
 
-    public setRealtimeEnabled(enabled: boolean) {
-        this.realtimeEnabled = enabled;
-        console.log(`[Hybrid] Realtime visualization enabled: ${enabled}`);
+    /** Compute a rotation quaternion from measured gravity. Given an
+     * accelerometer reading (ax,ay,az), returns a quaternion that
+     * rotates the body frame so that the gravity vector points along
+     * the +Z world axis. */
+    private getRotationFromGravity(ax: number, ay: number, az: number): Quaternion {
+        const norm = Math.sqrt(ax * ax + ay * ay + az * az);
+        if (norm === 0) return { w: 1, x: 0, y: 0, z: 0 };
+        const u = { x: ax / norm, y: ay / norm, z: az / norm };
+        const v = { x: 0, y: 0, z: 1 }; // target world +Z
+        const dot = u.x * v.x + u.y * v.y + u.z * v.z;
+        if (dot > 0.999) return { w: 1, x: 0, y: 0, z: 0 };
+        if (dot < -0.999) return { w: 0, x: 1, y: 0, z: 0 };
+        const w = 1 + dot;
+        const x = u.y * v.z - u.z * v.y;
+        const y = u.z * v.x - u.x * v.z;
+        const z = u.x * v.y - u.y * v.x;
+        return QuatMath.normalize({ w, x, y, z });
     }
 
-    // --- Helpers ---
-
+    /** Update the sliding buffers with the magnitude of the
+     * accelerometer and gyroscope measurements. */
     private updateBuffers(a: Vec3, w: Vec3) {
         const a_mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
         const w_mag = Math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
         this.accelBuffer.push(a_mag);
         this.gyroBuffer.push(w_mag);
-        if (this.accelBuffer.length > this.BUFFER_SIZE) this.accelBuffer.shift();
-        if (this.gyroBuffer.length > this.BUFFER_SIZE) this.gyroBuffer.shift();
+        if (this.accelBuffer.length > this.bufferSize) this.accelBuffer.shift();
+        if (this.gyroBuffer.length > this.bufferSize) this.gyroBuffer.shift();
     }
 
-    public isStationary(): boolean {
-        if (this.accelBuffer.length < this.BUFFER_SIZE) return false;
-        const avgA = this.accelBuffer.reduce((s, v) => s + v, 0) / this.accelBuffer.length;
-        const avgW = this.gyroBuffer.reduce((s, v) => s + v, 0) / this.gyroBuffer.length;
-        const varA = this.accelBuffer.reduce((s, v) => s + (v - avgA) ** 2, 0) / this.accelBuffer.length;
-
-        const ACCEL_MEAN_TOLERANCE = 0.5;
-        const ACCEL_VAR_TOLERANCE = 0.2;
-        const GYRO_MEAN_TOLERANCE = 0.1;
-
-        if (avgW > GYRO_MEAN_TOLERANCE) return false;
-        if (Math.abs(avgA - this.GRAVITY) > ACCEL_MEAN_TOLERANCE) return false;
-        if (varA > ACCEL_VAR_TOLERANCE) return false;
-
-        return true;
+    /** Determine whether the sensor is currently stationary based on
+     * recent accelerometer and gyroscope magnitudes. Returns
+     * isCandidate along with diagnostic metrics. */
+    private checkStationaryCandidate(): { isCandidate: boolean; metrics: any } {
+        if (this.accelBuffer.length < this.bufferSize) {
+            return { isCandidate: false, metrics: {} };
+        }
+        const mean = (arr: number[]) => arr.reduce((s, x) => s + x, 0) / arr.length;
+        const variance = (arr: number[], m: number) => arr.reduce((s, x) => s + (x - m) * (x - m), 0) / arr.length;
+        const meanA = mean(this.accelBuffer);
+        const meanW = mean(this.gyroBuffer);
+        const stdA = Math.sqrt(variance(this.accelBuffer, meanA));
+        const stdW = Math.sqrt(variance(this.gyroBuffer, meanW));
+        // Thresholds tuned for typical handheld IMU noise. Adjust as needed.
+        const isAccelStable = Math.abs(meanA - this.GRAVITY) < 0.5 && stdA < 0.15;
+        const isGyroStable = meanW < 0.15 && stdW < 0.05;
+        return {
+            isCandidate: isAccelStable && isGyroStable,
+            metrics: { meanA, stdA, meanW, stdW },
+        };
     }
 
-    private getLastPoint(): TrajectoryPoint {
-        if (this.path.length > 0) return this.path[this.path.length - 1];
-        return { timestamp: 0, position: { x: 0, y: 0, z: 0 }, rotation: { w: 1, x: 0, y: 0, z: 0 }, relativePosition: { x: 0, y: 0, z: 0 } };
+    /** Convert quaternion to Euler angles (roll, pitch, yaw). Returns
+     * angles in radians. */
+    private toEuler(q: Quaternion): { x: number; y: number; z: number } {
+        const sinr_cosp = 2 * (q.w * q.x + q.y * q.z);
+        const cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y);
+        const roll = Math.atan2(sinr_cosp, cosr_cosp);
+        const sinp = 2 * (q.w * q.y - q.z * q.x);
+        let pitch: number;
+        if (Math.abs(sinp) >= 1) {
+            pitch = Math.sign(sinp) * (Math.PI / 2);
+        } else {
+            pitch = Math.asin(sinp);
+        }
+        const siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+        const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+        const yaw = Math.atan2(siny_cosp, cosy_cosp);
+        return { x: roll, y: pitch, z: yaw };
     }
 
-    // --- Public API ---
-    getPath() { return this.path; }
-    getOrientation() { return this.q; }
-    getVelocity() { return this.v; }
-    getIsCalibrating() { return this.isCalibrating; }
-
-    // Aux: Rotation from Gravity (Static Alignment)
-    private getRotationFromGravity(ax: number, ay: number, az: number): Quaternion {
-        const norm = Math.sqrt(ax * ax + ay * ay + az * az);
-        if (norm === 0) return QuatMath.identity();
-
-
-        const u = { x: ax / norm, y: ay / norm, z: az / norm };
-
-        // Queremos R(q) * u = [0,0,1]
-        const crossX = u.y;
-        const crossY = -u.x;
-        const dot = u.z;
-
-        if (dot > 0.9999) return QuatMath.identity();
-        if (dot < -0.9999) return { w: 0, x: 1, y: 0, z: 0 };
-
-        const w = 1 + dot;
-        const x = crossX;
-        const y = crossY;
-        const z = 0;
-
-        return QuatMath.normalize({ w, x, y, z });
+    /** Returns the last emitted TrajectoryPoint or a zeroed point if
+     * none exists. */
+    private getLastPoint(nowTs: number): TrajectoryPoint {
+        if (this.lastPoint) return this.lastPoint;
+        return {
+            timestamp: nowTs,
+            position: Vec3Math.zero(),
+            rotation: { w: 1, x: 0, y: 0, z: 0 },
+            relativePosition: Vec3Math.zero(),
+        };
     }
 
-    async calibrateAsync(durationMs: number = 5000) {
-        console.log('[Hybrid] Starting Calibration...');
+    /** Returns the recorded path of trajectory points. */
+    public getPath() { return this.path; }
+    /**
+     * Returns the current orientation of the bar for UI. The raw
+     * sensor orientation (sensor->world) is first combined with the
+     * fixed mount rotation (bar->sensor) to produce the bar
+     * orientation (bar->world). Then a -90° rotation about the X axis
+     * is applied to convert from the physics Z‑up coordinate frame to
+     * the UI Y‑up coordinate frame. The returned quaternion can be
+     * passed directly to the OrientationViz component.
+     */
+    public getOrientation() {
+        const q_bar_world = QuatMath.multiply(this.q, this.q_mount);
+        const fix = { w: Math.SQRT1_2, x: -Math.SQRT1_2, y: 0, z: 0 };
+        return QuatMath.normalize(QuatMath.multiply(fix, q_bar_world));
+    }
+    /** Returns the current linear velocity vector. */
+    public getVelocity() { return this.v; }
+    /** Returns whether the sensor is currently calibrating. */
+    public getIsCalibrating() { return this.isCalibrating; }
+
+    /** Begin calibration. Samples will be collected for `d` milliseconds
+     * to compute a robust initial orientation based on the average
+     * accelerometer reading. During calibration the processSample
+     * method will return zeroed points. After calibration completes,
+     * the orientation is initialised from the buffered samples and
+     * kinematics are reset. */
+    public async calibrateAsync(d: number = 2000) {
         this.isCalibrating = true;
         this.calibrationBuffer = [];
-        await new Promise(r => setTimeout(r, durationMs));
+        console.log('[Hybrid] Calibration started');
+        await new Promise((resolve) => setTimeout(resolve, d));
         this.isCalibrating = false;
-
-        if (this.calibrationBuffer.length < 100) {
-            console.log('Calibration failed: not enough samples');
-            return;
+        // Compute average acceleration from calibration buffer
+        if (this.calibrationBuffer.length > 0) {
+            let sumAx = 0, sumAy = 0, sumAz = 0;
+            for (const s of this.calibrationBuffer) {
+                sumAx += s.ax * this.GRAVITY;
+                sumAy += s.ay * this.GRAVITY;
+                sumAz += s.az * this.GRAVITY;
+            }
+            const n = this.calibrationBuffer.length;
+            const avgAx = sumAx / n;
+            const avgAy = sumAy / n;
+            const avgAz = sumAz / n;
+            const qInit = this.getRotationFromGravity(avgAx, avgAy, avgAz);
+            this.q = qInit;
+            this.madgwick.setQuaternion(qInit);
+            this.isOrientationInitialized = true;
+            console.log('[Hybrid] Calibration complete. Orientation initialised.');
+        } else {
+            console.warn('[Hybrid] Calibration complete but no samples collected. Orientation will be initialised on next sample.');
         }
-
-        // Simple average for biases
-        let bx = 0, by = 0, bz = 0;
-        let gx = 0, gy = 0, gz = 0;
-        const n = this.calibrationBuffer.length;
-
-        for (const s of this.calibrationBuffer) {
-            gx += s.gx; gy += s.gy; gz += s.gz;
-        }
-
-        // Gyro Bias in Rad/s
-        this.gb = {
-            x: (gx / n) * (Math.PI / 180),
-            y: (gy / n) * (Math.PI / 180),
-            z: (gz / n) * (Math.PI / 180)
-        };
-        console.log(`[Hybrid] Calibrated Gyro Bias: ${this.gb.x.toFixed(4)}, ${this.gb.y.toFixed(4)}, ${this.gb.z.toFixed(4)}`);
-
+        // Reset kinematics after calibration but preserve raw data buffer
         this.resetKinematics();
     }
 
-    // --- Stub Methods for Compatibility ---
-    public isOnGround() { return this.isStationary() && Math.abs(this.p.z) < 0.15; }
-
-    // =================================================================
-    // POST-PROCESSING & VBT METRICS (Restoring lost functionality)
-    // =================================================================
+    /** Return the raw data buffer for offline analysis. */
+    public getRawData() { return this.rawDataBuffer; }
+    /** Enable or disable real‑time trajectory updates to the UI. */
+    public setRealtimeEnabled(enabled: boolean) { this.realtimeEnabled = enabled; }
 
     /**
-     * Apply offline corrections to raw data buffer (ZUPT + Boundary Condition)
+     * Post‑process the captured raw data into a corrected trajectory path.
+     *
+     * During real‑time streaming we disable UI updates and simply
+     * integrate internally. When streaming stops we can call this
+     * function to construct a full trajectory from the stored raw
+     * samples. It builds a new path by iterating over the raw data
+     * buffer, computing a relative position from the initial point and
+     * applying both the mount rotation and UI fix rotation to the
+     * orientation. This method does not alter the internal filter
+     * state and can be called multiple times. If the rawDataBuffer is
+     * empty, the path will remain empty.
      */
-    applyPostProcessingCorrections() {
-        if (this.rawDataBuffer.length < 10) {
-            console.warn('[POST-PROC] Insufficient data for corrections');
+    public applyPostProcessingCorrections() {
+        // Clear any previously computed path
+        this.path = [];
+        if (this.rawDataBuffer.length === 0) {
+            console.warn('[Hybrid] applyPostProcessingCorrections: No raw data to process');
             return;
         }
+        // Use the first recorded position as the baseline for relative
+        // displacement. This ensures the trajectory starts at the
+        // origin in the UI. We do not use this.baselineP here
+        // because baselineP may have been modified during streaming
+        // resets. Instead, derive from raw data directly.
+        const first = this.rawDataBuffer[0];
+        const baseline: Vec3 = { x: first.p_raw.x, y: first.p_raw.y, z: first.p_raw.z };
+        const fix: Quaternion = { w: Math.SQRT1_2, x: -Math.SQRT1_2, y: 0, z: 0 };
 
-        const N = this.rawDataBuffer.length;
-        console.log('[POST-PROC] Starting Corrections on ' + N + ' samples...');
-
-        // STEP 0: Analyze raw data
-        const v_final = this.rawDataBuffer[N - 1].v_raw;
-
-        // STEP 1: ZUPT - Force zero velocity at start and end
-        // Distribute velocity error linearly across the set
-        for (let i = 0; i < N; i++) {
-            const ratio = i / (N - 1);
-            this.rawDataBuffer[i].v_raw = {
-                x: this.rawDataBuffer[i].v_raw.x - (v_final.x * ratio),
-                y: this.rawDataBuffer[i].v_raw.y - (v_final.y * ratio),
-                z: this.rawDataBuffer[i].v_raw.z - (v_final.z * ratio)
+        // Iterate through raw samples and rebuild trajectory points
+        for (const record of this.rawDataBuffer) {
+            const t = record.timestamp as number;
+            // Use the raw position recorded from the Kalman filter
+            const p_raw: Vec3 = record.p_raw;
+            // Compute relative position from baseline
+            const relP: Vec3 = {
+                x: p_raw.x - baseline.x,
+                y: p_raw.y - baseline.y,
+                z: p_raw.z - baseline.z,
             };
+            // Raw orientation (sensor->world) at this sample
+            const q_raw: Quaternion = record.q;
+            // Apply mount rotation to convert to bar frame
+            const q_bar_world = QuatMath.multiply(q_raw, this.q_mount);
+            // Apply fix rotation to convert world Z‑up to UI Y‑up
+            const q_visual = QuatMath.normalize(QuatMath.multiply(fix, q_bar_world));
+            // Compose trajectory point
+            this.path.push({
+                timestamp: t,
+                position: { ...p_raw },
+                rotation: q_visual,
+                relativePosition: relP,
+            });
         }
-
-        // STEP 2: Re-integrate position with corrected velocity
-        this.rawDataBuffer[0].p_raw = Vec3Math.zero(); // Start at origin
-
-        for (let i = 1; i < N; i++) {
-            const dt = (this.rawDataBuffer[i].timestamp - this.rawDataBuffer[i - 1].timestamp) / 1000.0;
-            // Trapezoidal integration for better accuracy
-            const v_avg = {
-                x: (this.rawDataBuffer[i].v_raw.x + this.rawDataBuffer[i - 1].v_raw.x) / 2,
-                y: (this.rawDataBuffer[i].v_raw.y + this.rawDataBuffer[i - 1].v_raw.y) / 2,
-                z: (this.rawDataBuffer[i].v_raw.z + this.rawDataBuffer[i - 1].v_raw.z) / 2
-            };
-
-            this.rawDataBuffer[i].p_raw = {
-                x: this.rawDataBuffer[i - 1].p_raw.x + v_avg.x * dt,
-                y: this.rawDataBuffer[i - 1].p_raw.y + v_avg.y * dt,
-                z: this.rawDataBuffer[i - 1].p_raw.z + v_avg.z * dt
-            };
-        }
-
-        // STEP 3: BOUNDARY - Force return to origin (p_final = p_initial = 0)
-        const p_final_drift = this.rawDataBuffer[N - 1].p_raw;
-
-        // Distribute position drift error linearly
-        for (let i = 1; i < N; i++) {
-            const ratio = i / (N - 1);
-            this.rawDataBuffer[i].p_raw = {
-                x: this.rawDataBuffer[i].p_raw.x - (p_final_drift.x * ratio),
-                y: this.rawDataBuffer[i].p_raw.y - (p_final_drift.y * ratio),
-                z: this.rawDataBuffer[i].p_raw.z - (p_final_drift.z * ratio)
-            };
-        }
-
-        console.log('[POST-PROC] Corrections Complete.');
-
-        // Calculate VBT metrics using the cleaned data
-        this.calculateVBTMetrics();
-
-        // Update the main path array so the UI graph updates
-        this.updatePathWithCorrectedData();
-    }
-
-    /**
-     * Calculate VBT (Velocity-Based Training) metrics
-     */
-    private calculateVBTMetrics() {
-        if (this.rawDataBuffer.length < 10) return;
-
-        console.log('[VBT] Calculating Metrics...');
-
-        // Determine vertical axis based on movement range
-        // (Simple heuristic: axis with largest variance)
-        // Or assume Z since we rotated to World Frame? 
-        // In our Hybrid code, we rotate to World, so Vertical is ALWAYS Z.
-        // But we kept the 'verticalAxis' property, let's use Z.
-
-        let v_vertical_max = 0;
-        let v_vertical_sum = 0;
-        let count_propulsive = 0;
-        let concentric_time = 0;
-
-        // Simple Concentric Phase detection: Velocity > 0 (Upward)
-        // Since we align gravity to -Z, Up is +Z.
-
-        for (let i = 0; i < this.rawDataBuffer.length; i++) {
-            const velZ = this.rawDataBuffer[i].v_raw.z;
-
-            if (velZ > 0.05) { // Threshold 0.05 m/s
-                if (velZ > v_vertical_max) v_vertical_max = velZ;
-                v_vertical_sum += velZ;
-                count_propulsive++;
-            }
-        }
-
-        const mpv = count_propulsive > 0 ? v_vertical_sum / count_propulsive : 0;
-
-        console.log(`[VBT] Peak Velocity: ${v_vertical_max.toFixed(3)} m/s`);
-        console.log(`[VBT] Mean Propulsive Velocity: ${mpv.toFixed(3)} m/s`);
-    }
-
-    /**
-     * Update this.path[] with corrected data from rawDataBuffer
-     */
-    private updatePathWithCorrectedData() {
-        this.path = this.rawDataBuffer.map(sample => ({
-            timestamp: sample.timestamp,
-            position: { ...sample.p_raw },
-            rotation: { ...sample.q },
-            relativePosition: { ...sample.p_raw } // Relative to origin (0,0,0)
-        }));
-
-        console.log(`[POST-PROC] Updated path[] with ${this.path.length} corrected samples`);
+        console.log(`[Hybrid] Post-processing complete. Generated ${this.path.length} trajectory points.`);
     }
 }
 
+// Export a singleton instance
 export const trajectoryService = new TrajectoryService();

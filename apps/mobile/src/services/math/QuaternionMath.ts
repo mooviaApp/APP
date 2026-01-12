@@ -90,5 +90,43 @@ export const QuatMath = {
     // dq = [1, 0.5 * dtheta]
     fromOneHalfTheta: (dtheta: Vec3): Quaternion => {
         return { w: 1, x: 0.5 * dtheta.x, y: 0.5 * dtheta.y, z: 0.5 * dtheta.z };
+    },
+
+    /**
+     * Convert Quaternion to Euler Angles (Roll, Pitch, Yaw)
+     * Convention: Z-Y-X (Yaw-Pitch-Roll)
+     * Returns in Radians
+     */
+    toEuler: (q: Quaternion): Vec3 => {
+        // roll (x-axis rotation)
+        const sinr_cosp = 2 * (q.w * q.x + q.y * q.z);
+        const cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y);
+        const roll = Math.atan2(sinr_cosp, cosr_cosp);
+
+        // pitch (y-axis rotation)
+        const sinp = 2 * (q.w * q.y - q.z * q.x);
+        let pitch = 0;
+        if (Math.abs(sinp) >= 1)
+            pitch = Math.sign(sinp) * (Math.PI / 2); // use 90 degrees if out of range
+        else
+            pitch = Math.asin(sinp);
+
+        // yaw (z-axis rotation)
+        const siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+        const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+        const yaw = Math.atan2(siny_cosp, cosy_cosp);
+
+        return { x: roll, y: pitch, z: yaw };
+    },
+
+    fromAxisAngle: (axis: Vec3, angle: number): Quaternion => {
+        const halfAngle = angle * 0.5;
+        const s = Math.sin(halfAngle);
+        return {
+            w: Math.cos(halfAngle),
+            x: axis.x * s,
+            y: axis.y * s,
+            z: axis.z * s
+        };
     }
 };
