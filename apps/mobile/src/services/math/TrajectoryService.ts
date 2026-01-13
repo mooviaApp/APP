@@ -329,7 +329,8 @@ export class TrajectoryService {
         this.lastPoint = null;
         this.accelBuffer = [];
         this.gyroBuffer = [];
-        // Do NOT clear rawDataBuffer here; keep accumulated data for analysis
+        // Clear rawDataBuffer to start fresh for each new session
+        this.rawDataBuffer = [];
         this.baselineP = Vec3Math.zero();
         this.stationaryTick = 0;
         this.movingTick = 0;
@@ -779,6 +780,20 @@ export class TrajectoryService {
             });
         }
         console.log(`[Hybrid] Post-processing complete. Generated ${this.path.length} trajectory points.`);
+    }
+    // 1️⃣ MÉTODO NUEVO: devuelve la aceleración lineal pico (m/s²)
+    public getPeakLinearAcceleration(): number {
+        if (!this.rawDataBuffer || this.rawDataBuffer.length === 0) return 0;
+        let maxAcc = 0;
+        for (const s of this.rawDataBuffer) {
+            // acc_net es un Vec3 con la aceleración lineal (sin gravedad) en m/s²
+            const acc = s.acc_net;
+            if (acc) {
+                const mag = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+                if (mag > maxAcc) maxAcc = mag;
+            }
+        }
+        return maxAcc; // valor en m/s²
     }
 }
 

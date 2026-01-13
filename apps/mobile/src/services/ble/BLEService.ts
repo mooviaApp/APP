@@ -21,6 +21,7 @@ import {
     decodeNotification,
     encodeCommand,
     decodeBase64ToBytes,
+    resetIMUTimestampContinuity,
 } from './dataDecoder';
 import { trajectoryService } from '../math/TrajectoryService';
 
@@ -230,7 +231,7 @@ export class BLEService {
             // 3. Enable notifications (Samples & Logs) BEFORE MTU/Start
             await this.enableNotifications();
 
-            // 4. Request MTU (CRITICAL for 181-byte packets)
+            // 4. Request MTU (CRITICAL for large packets)
             console.log(`[BLE] Requesting MTU: ${BLE_CONFIG.REQUIRED_MTU}`);
             let negotiatedMTU = 23; // Default MTU if negotiation fails
 
@@ -243,8 +244,11 @@ export class BLEService {
 
                 console.log(`[BLE] ✅ MTU negotiated: ${negotiatedMTU} bytes`);
 
-                if (negotiatedMTU < SENSOR_CONFIG.PACKET_SIZE_BYTES + 4) {
-                    const errorMsg = `CRITICAL: MTU ${negotiatedMTU} too small for ${SENSOR_CONFIG.PACKET_SIZE_BYTES}-byte packets!`;
+                const maxNotifPayload = negotiatedMTU - 3; // ATT notification overhead
+                if (SENSOR_CONFIG.PACKET_SIZE_BYTES > maxNotifPayload) {
+                    const errorMsg =
+                        `CRITICAL: MTU ${negotiatedMTU} too small. ` +
+                        `Max notif payload is ${maxNotifPayload}, need ${SENSOR_CONFIG.PACKET_SIZE_BYTES}.`;
                     console.error(`[BLE] ${errorMsg}`);
                     throw new Error(errorMsg);
                 }
@@ -494,6 +498,12 @@ export class BLEService {
      */
     async startStreaming(): Promise<void> {
         this.sampleBuffer = []; // Clear buffer
+        // Reset timestamp continuity for a fresh streaming session
+        resetIMUTimestampContinuity();
+        // Clear any previous trajectory data
+        trajectoryService.reset();
+        // Enable realtime path updates
+        trajectoryService.setRealtimeEnabled(true);
         await this.sendCommand(BLE_COMMANDS.STREAM_ON);
     }
 
@@ -502,6 +512,8 @@ export class BLEService {
      */
     async stopStreaming(): Promise<void> {
         await this.sendCommand(BLE_COMMANDS.STREAM_OFF);
+        trajectoryService.setRealtimeEnabled(false);
+        trajectoryService.applyPostProcessingCorrections();
     }
 
     /**

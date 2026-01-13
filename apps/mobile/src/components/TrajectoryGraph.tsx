@@ -20,59 +20,67 @@ export function TrajectoryGraph({
     const processedPath = useMemo(() => {
         if (!path || path.length < 2) return null;
 
-        // Extract vertical position (Z usually, or Y depending on frame)
-        // Based on VBT logs, Y seems to be the vertical axis detected, 
-        // but let's assume we want to plot the dominant movement axis.
-        // For simplicity in this graph, we'll plot the magnitude of displacement or just Z.
-        // Given the logs showed Y as vertical, we'll try to plot Y.
-        // Or better yet, plot the "vertical" component relative to start.
+        // 1. Determine bounding box for X (lateral) and Z (vertical)
+        let minX = Infinity, maxX = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
 
-        // Let's iterate to find min/max for scaling
-        let minVal = Infinity;
-        let maxVal = -Infinity;
-        let startTime = path[0].timestamp;
-        let endTime = path[path.length - 1].timestamp;
-
+        // We use X for lateral deviation and Z for vertical height
         const points = path.map(p => {
-            // Use Z as Vertical Axis (World Frame is Z-up)
-            const val = p.position.z;
-            if (val < minVal) minVal = val;
-            if (val > maxVal) maxVal = val;
-            return { t: p.timestamp, v: val };
+            const x = p.position.x; // Lateral deviation
+            const z = p.position.z; // Vertical height
+
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+
+            return { x, z };
         });
 
-        // Add some padding
-        const range = maxVal - minVal;
-        const padding = range * 0.1 || 0.1; // fallback if range is 0
-        const yMin = minVal - padding;
-        const yMax = maxVal + padding;
-        const yRange = yMax - yMin;
+        // 2. Add padding and center horizontally
+        const zRange = maxZ - minZ || 0.1;
+        const xRange = maxX - minX || 0.1;
 
-        const timeRange = endTime - startTime;
-        if (timeRange <= 0) return null;
+        // Ensure aspect ratio is somewhat preserved or at least readable
+        // We want 0 deviation to be in the CENTER of the width
+        const maxAbsX = Math.max(Math.abs(minX), Math.abs(maxX));
+        const limitX = Math.max(maxAbsX, 0.1); // at least 10cm width
 
-        // Create SVG Path command
-        let d = `M 0,${height}`; // Start at bottom-left (approx)
+        // Domain for X: [-limitX, +limitX] -> centered on 0
+        const domainXMin = -limitX * 1.5;
+        const domainXMax = limitX * 1.5;
+        const domainXRange = domainXMax - domainXMin;
 
+        // Domain for Z: [minZ, maxZ] plus padding
+        const domainZMin = minZ - (zRange * 0.1);
+        const domainZMax = maxZ + (zRange * 0.1);
+        const domainZRange = domainZMax - domainZMin;
+
+        // 3. Generate SVG Path
         const svgPoints = points.map(p => {
-            const x = ((p.t - startTime) / timeRange) * width;
-            // SVM Y coordinates: 0 is top, height is bottom. 
-            // We want positive values to go UP.
-            // Normalized value (0 to 1): (val - yMin) / yRange
-            // Screen Y: height - (norm * height)
-            const normalizedY = (p.v - yMin) / yRange;
-            const y = height - (normalizedY * height);
-            return { x, y };
+            // Map X to width (0..width)
+            const normX = (p.x - domainXMin) / domainXRange;
+            const screenX = normX * width;
+
+            // Map Z to height (0..height), inverted (screen Y goes down)
+            const normZ = (p.z - domainZMin) / domainZRange;
+            const screenY = height - (normZ * height);
+
+            return { x: screenX, y: screenY };
         });
 
-        if (svgPoints.length > 0) {
-            d = `M ${svgPoints[0].x},${svgPoints[0].y}`;
-            for (let i = 1; i < svgPoints.length; i++) {
-                d += ` L ${svgPoints[i].x},${svgPoints[i].y}`;
-            }
+        if (svgPoints.length === 0) return null;
+
+        let d = `M ${svgPoints[0].x},${svgPoints[0].y}`;
+        for (let i = 1; i < svgPoints.length; i++) {
+            d += ` L ${svgPoints[i].x},${svgPoints[i].y}`;
         }
 
-        return { d, yMin, yMax };
+        // Calculate center line (x=0)
+        const centerNormX = (0 - domainXMin) / domainXRange;
+        const centerX = centerNormX * width;
+
+        return { d, centerX, maxX: maxAbsX, maxZ };
     }, [path, height, width]);
 
     if (!path || path.length === 0) {
@@ -93,27 +101,43 @@ export function TrajectoryGraph({
 
     return (
         <View style={[styles.container, { height, width }]}>
-            <Text style={styles.title}>Vertical Trajectory (Z)</Text>
+            <Text style={styles.title}>Vista Frontal (Desviación vs Altura)</Text>
+
+            {/* Overlay Info */}
+            <View style={styles.statsOverlay}>
+                <Text style={styles.statText}>Var. Lateral: ±{processedPath.maxX.toFixed(2)}m</Text>
+                <Text style={styles.statText}>Altura Máx: {processedPath.maxZ.toFixed(2)}m</Text>
+            </View>
+
             <Svg height={height} width={width} viewBox={`0 0 ${width} ${height}`}>
-                {/* Zero Line (if within range) */}
-                {/* We map 0 value to Y pixels */}
+                {/* Center Reference Line (Vertical) */}
+                <Line
+                    x1={processedPath.centerX}
+                    y1="0"
+                    x2={processedPath.centerX}
+                    y2={height}
+                    stroke="#333"
+                    strokeWidth="1"
+                    strokeDasharray="5, 5"
+                />
 
-                {/* Grid lines or decoration could go here */}
-
-                {/* The Trajectory Path */}
+                {/* The Bar Path */}
                 <Path
                     d={processedPath.d}
                     stroke={color}
                     strokeWidth="3"
                     fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+                    strokeLinecap="round" // Round ends for cleaner look
+                    strokeLinejoin="round" // Smooth corners
+                />
+
+                {/* Start Point Marker */}
+                <Path
+                    d={`M ${width / 2 - 4},${height - 5} L ${width / 2 + 4},${height - 5}`}
+                    stroke="#555"
+                    strokeWidth="2"
                 />
             </Svg>
-            <View style={styles.labels}>
-                <Text style={styles.label}>{processedPath.yMin.toFixed(2)}m</Text>
-                <Text style={styles.label}>{processedPath.yMax.toFixed(2)}m</Text>
-            </View>
         </View>
     );
 }
@@ -137,16 +161,17 @@ const styles = StyleSheet.create({
         fontSize: 14,
         fontStyle: 'italic'
     },
-    labels: {
+    statsOverlay: {
         position: 'absolute',
-        right: 10,
-        top: 10,
-        bottom: 10,
-        justifyContent: 'space-between',
-        alignItems: 'flex-end'
+        right: 15,
+        top: 35,
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        padding: 4,
+        borderRadius: 4,
     },
-    label: {
+    statText: {
         color: '#777',
-        fontSize: 10
+        fontSize: 10,
+        marginBottom: 2
     }
 });

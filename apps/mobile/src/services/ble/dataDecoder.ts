@@ -16,6 +16,25 @@ import {
     SENSOR_CONFIG,
 } from './constants';
 
+// Timestamp continuity state (cross‑packet)
+let lastHwTimestamp16: number | null = null;
+let lastAbsTimestampMs: number | null = null;
+
+/**
+ * Reset the hardware timestamp continuity state. Called when a new streaming session starts.
+ */
+export function resetIMUTimestampContinuity() {
+    lastHwTimestamp16 = null;
+    lastAbsTimestampMs = null;
+}
+
+/**
+ * Compute a 16‑bit wrap‑safe delta (prev → curr).
+ */
+function deltaTicks16(prev: number, curr: number) {
+    return (curr - prev + 0x10000) & 0xffff;
+}
+
 // ============================================================================
 // Low-level Data Conversion
 // ============================================================================
@@ -94,17 +113,17 @@ export function rawToAccel(raw: number): number {
 // ============================================================================
 
 /**
- * Decode IMU sample data packet with 20 aggregated samples
- * 
- * Packet structure (181 bytes):
+ * Decode IMU sample data packet with 15 samples (each includes a hardware timestamp)
+ *
+ * Packet structure (211 bytes):
  * - Byte 0: Message type (0x02)
- * - Bytes 1-12: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE)
- * - Bytes 13-24: Sample 2
+ * - Bytes 1-14: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE, hwTs as uint16 LE)
+ * - Bytes 15-28: Sample 2
  * - ... (continues for 15 samples total)
- * - Bytes 169-180: Sample 15
- * 
+ * - Bytes 197-210: Sample 15
+ *
  * @param bytes - Raw byte array from BLE notification
- * @returns Array of 15 decoded IMU samples with physical units
+ * @returns Array of 15 decoded IMU samples with physical units and timestamps
  */
 export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
     // Dynamic Packet Size Handling
@@ -154,51 +173,69 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
         });
     }
 
-    // 2. Reconstruct Relative Timing
-    // Strategy: Anchor last sample to Date.now(), back-calculate others using hwTs deltas
+    // 2. Reconstruct Relative Timing using hardware timestamp continuity
     const samples: IMUSample[] = new Array(sampleCount);
     const now = Date.now();
 
-    // Initialize last sample
-    if (sampleCount > 0) {
-        const lastIdx = sampleCount - 1;
-        const lastRaw = parsedRaw[lastIdx];
-
-        samples[lastIdx] = {
-            timestamp: new Date(now).toISOString(),
-            timestampMs: now,
-            ax: lastRaw.ax, ay: lastRaw.ay, az: lastRaw.az,
-            gx: lastRaw.gx, gy: lastRaw.gy, gz: lastRaw.gz,
-        };
-
-        // Back-fill previous samples
-        for (let i = lastIdx - 1; i >= 0; i--) {
-            const curr = parsedRaw[i];
-            const next = parsedRaw[i + 1]; // We know next is valid because we go backwards
-            const nextTime = samples[i + 1].timestampMs;
-
-            // Calculate delta ticks (handling 16-bit wrap-around)
-            let deltaTicks = (next.hwTs - curr.hwTs);
-            if (deltaTicks < 0) deltaTicks += 65536;
-
-            // Convert to ms using V3 scaling factor
-            // deltaMs = ticks * (32/30 ns/tick) / 1000 us/ms ... wait.
-            // SENSOR_CONFIG.TIMESTAMP_TICK_US is in MICROSECONDS.
-            // So deltaTicks * tick_us = total_us.
-            // total_us / 1000 = total_ms.
-            const deltaMs = (deltaTicks * SENSOR_CONFIG.TIMESTAMP_TICK_US) / 1000.0;
-
-            // Compute time: next - delta
-            const currTime = nextTime - deltaMs;
-
-            samples[i] = {
-                timestamp: new Date(currTime).toISOString(),
-                timestampMs: currTime,
-                ax: curr.ax, ay: curr.ay, az: curr.az,
-                gx: curr.gx, gy: curr.gy, gz: curr.gz,
-            };
+    // Determine anchor for the last sample of this packet
+    let anchorMs: number;
+    if (lastHwTimestamp16 === null || lastAbsTimestampMs === null) {
+        // No previous state – anchor to wall clock
+        anchorMs = now;
+        console.log('[Decoder] Timestamp anchor: wall‑clock (continuity reset)');
+    } else {
+        // Compute delta from previous packet's last hw timestamp to this packet's last hw timestamp
+        const lastRaw = parsedRaw[sampleCount - 1];
+        const dTicks = deltaTicks16(lastHwTimestamp16, lastRaw.hwTs);
+        const dMs = (dTicks * SENSOR_CONFIG.TIMESTAMP_TICK_US) / 1000.0;
+        // Sanity check – if the gap is unexpectedly large, fall back to wall clock
+        if (dMs > 1000) {
+            anchorMs = now;
+            console.log('[Decoder] Timestamp anchor: wall‑clock (large gap)');
+        } else {
+            anchorMs = lastAbsTimestampMs + dMs;
         }
     }
+
+    // Populate the last sample using the anchor
+    const lastIdx = sampleCount - 1;
+    const lastRaw = parsedRaw[lastIdx];
+    samples[lastIdx] = {
+        timestamp: new Date(anchorMs).toISOString(),
+        timestampMs: anchorMs,
+        ax: lastRaw.ax,
+        ay: lastRaw.ay,
+        az: lastRaw.az,
+        gx: lastRaw.gx,
+        gy: lastRaw.gy,
+        gz: lastRaw.gz,
+    };
+
+    // Back‑calculate timestamps for preceding samples within the packet
+    for (let i = lastIdx - 1; i >= 0; i--) {
+        const curr = parsedRaw[i];
+        const next = parsedRaw[i + 1];
+        const nextTime = samples[i + 1].timestampMs;
+
+        const dTicks = deltaTicks16(curr.hwTs, next.hwTs);
+        const dMs = (dTicks * SENSOR_CONFIG.TIMESTAMP_TICK_US) / 1000.0;
+        const currTime = nextTime - dMs;
+
+        samples[i] = {
+            timestamp: new Date(currTime).toISOString(),
+            timestampMs: currTime,
+            ax: curr.ax,
+            ay: curr.ay,
+            az: curr.az,
+            gx: curr.gx,
+            gy: curr.gy,
+            gz: curr.gz,
+        };
+    }
+
+    // Update global continuity state for the next packet
+    lastHwTimestamp16 = lastRaw.hwTs;
+    lastAbsTimestampMs = anchorMs;
 
     return samples;
 }
