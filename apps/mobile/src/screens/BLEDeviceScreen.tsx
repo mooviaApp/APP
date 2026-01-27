@@ -37,6 +37,8 @@ const COLORS = {
 export function BLEDeviceScreen() {
     const [finalPath, setFinalPath] = useState<TrajectoryPoint[]>([]);
     const [peakAcceleration, setPeakAcceleration] = useState<number | null>(null);
+    const [meanPropulsiveVelocity, setMeanPropulsiveVelocity] = useState<number | null>(null);
+    const [maxHeight, setMaxHeight] = useState<number | null>(null);
 
     const {
         isScanning,
@@ -62,6 +64,8 @@ export function BLEDeviceScreen() {
     const handleStartStreaming = async () => {
         setFinalPath([]); // Clear previous graph
         setPeakAcceleration(null); // Clear previous peak acceleration
+        setMeanPropulsiveVelocity(null);
+        setMaxHeight(null);
         await startStreaming();
     };
 
@@ -72,15 +76,21 @@ export function BLEDeviceScreen() {
             console.log('[UI] Stream stopped. Updating graph path with ' + points + ' points');
             setFinalPath([...trajectoryService.getPath()]);
 
-            // Obtener la aceleración lineal pico después del post-processing
+            // Obtener métricas después del post-processing
             const peakAcc = trajectoryService.getPeakLinearAcceleration();
+            const vmp = trajectoryService.getMeanPropulsiveVelocity();
+            const height = trajectoryService.getMaxHeight();
+
             setPeakAcceleration(peakAcc);
-            console.log('[UI] Peak Linear Acceleration: ' + peakAcc.toFixed(2) + ' m/s²');
+            setMeanPropulsiveVelocity(vmp);
+            setMaxHeight(height);
+
+            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/s², VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m`);
 
             // DEBUG ALERT: Confirm data quantity to user
             Alert.alert(
-                "Resultados",
-                `Puntos de trayectoria: ${points}\nAceleración pico: ${peakAcc.toFixed(2)} m/s²`
+                "Resultados del Levantamiento",
+                `VMP: ${vmp.toFixed(2)} m/s\nAceleración Pico: ${peakAcc.toFixed(2)} m/s²\nAltura Máxima: ${height.toFixed(2)} m`
             );
         } catch (e: any) {
             Alert.alert("Error", "Failed to stop stream: " + e.message);
@@ -254,17 +264,38 @@ export function BLEDeviceScreen() {
                             trajectoryPath={finalPath}
                         />
 
-                        {/* Peak Acceleration Result */}
-                        {peakAcceleration !== null && (
-                            <View style={styles.peakAccCard}>
-                                <Text style={styles.peakAccLabel}>Aceleración Lineal Pico</Text>
-                                <Text style={styles.peakAccValue}>
-                                    {peakAcceleration.toFixed(2)}
-                                </Text>
-                                <Text style={styles.peakAccUnit}>m/s²</Text>
-                                <Text style={styles.peakAccHint}>
-                                    Indicador de explosividad del movimiento
-                                </Text>
+                        {/* Peak Results Cards */}
+                        {(peakAcceleration !== null || meanPropulsiveVelocity !== null) && (
+                            <View style={styles.resultsContainer}>
+                                {meanPropulsiveVelocity !== null && (
+                                    <View style={[styles.metricCard, { borderColor: COLORS.success }]}>
+                                        <Text style={styles.metricLabel}>V. Media Propulsiva</Text>
+                                        <Text style={[styles.metricValue, { color: COLORS.success }]}>
+                                            {meanPropulsiveVelocity.toFixed(2)}
+                                        </Text>
+                                        <Text style={styles.metricUnit}>m/s</Text>
+                                    </View>
+                                )}
+
+                                {maxHeight !== null && (
+                                    <View style={[styles.metricCard, { borderColor: COLORS.primary }]}>
+                                        <Text style={styles.metricLabel}>Altura Máxima</Text>
+                                        <Text style={[styles.metricValue, { color: COLORS.primary }]}>
+                                            {maxHeight.toFixed(2)}
+                                        </Text>
+                                        <Text style={styles.metricUnit}>m</Text>
+                                    </View>
+                                )}
+
+                                {peakAcceleration !== null && (
+                                    <View style={[styles.metricCard, { borderColor: COLORS.accent }]}>
+                                        <Text style={styles.metricLabel}>Acel. Lineal Pico</Text>
+                                        <Text style={[styles.metricValue, { color: COLORS.accent }]}>
+                                            {peakAcceleration.toFixed(2)}
+                                        </Text>
+                                        <Text style={styles.metricUnit}>m/s²</Text>
+                                    </View>
+                                )}
                             </View>
                         )}
 
@@ -535,37 +566,37 @@ const styles = StyleSheet.create({
         fontSize: 13,
         color: COLORS.text,
     },
-    // Estilos para la tarjeta de aceleración pico
-    peakAccCard: {
+    // Estilos para los resultados
+    resultsContainer: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        justifyContent: 'space-between',
+        marginTop: 16,
+        gap: 12,
+    },
+    metricCard: {
         backgroundColor: COLORS.card,
         borderRadius: 16,
-        padding: 24,
-        marginTop: 16,
+        padding: 16,
+        width: '48%',
         alignItems: 'center',
         borderWidth: 2,
-        borderColor: COLORS.accent,
     },
-    peakAccLabel: {
-        fontSize: 14,
+    metricLabel: {
+        fontSize: 10,
         color: COLORS.textMuted,
         marginBottom: 8,
         textTransform: 'uppercase',
-        letterSpacing: 1,
-    },
-    peakAccValue: {
-        fontSize: 48,
-        fontWeight: '800',
-        color: COLORS.accent,
-    },
-    peakAccUnit: {
-        fontSize: 18,
-        color: COLORS.text,
-        marginTop: 4,
-    },
-    peakAccHint: {
-        fontSize: 12,
-        color: COLORS.textMuted,
-        marginTop: 12,
+        letterSpacing: 0.5,
         textAlign: 'center',
+    },
+    metricValue: {
+        fontSize: 32,
+        fontWeight: '800',
+    },
+    metricUnit: {
+        fontSize: 14,
+        color: COLORS.text,
+        marginTop: 2,
     },
 });

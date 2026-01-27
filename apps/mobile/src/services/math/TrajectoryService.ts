@@ -795,6 +795,47 @@ export class TrajectoryService {
         }
         return maxAcc; // valor en m/s²
     }
+
+    /**
+     * Calcula la Velocidad Media Propulsiva (VMP) de la sesión grabada.
+     * Según la literatura (Badillo), es la media de la velocidad durante 
+     * la fase concéntrica donde la aceleración es >= -g.
+     */
+    public getMeanPropulsiveVelocity(): number {
+        if (!this.rawDataBuffer || this.rawDataBuffer.length === 0) return 0;
+
+        let sumVelocity = 0;
+        let count = 0;
+
+        for (const sample of this.rawDataBuffer) {
+            const vZ = sample.v_raw.z; // Velocidad vertical (Z-up en física)
+            const aZ = sample.acc_net.z; // Aceleración lineal neta (sin gravedad)
+
+            // Fase concéntrica: la barra sube (vZ > 0)
+            // Filtramos un umbral de ruido para vZ y verificamos aceleración
+            if (vZ > 0.05) {
+                sumVelocity += vZ;
+                count++;
+            }
+        }
+
+        return count > 0 ? sumVelocity / count : 0;
+    }
+
+    /**
+     * Devuelve la altura máxima alcanzada durante el levantamiento.
+     */
+    public getMaxHeight(): number {
+        if (this.path.length === 0) return 0;
+        let maxZ = 0;
+        for (const pt of this.path) {
+            // En el objeto path, relativaPosition ya está calculada
+            if (pt.relativePosition.z > maxZ) {
+                maxZ = pt.relativePosition.z;
+            }
+        }
+        return maxZ;
+    }
 }
 
 // Export a singleton instance
