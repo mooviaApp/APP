@@ -1,0 +1,119 @@
+\documentclass[11pt,a4paper,oneside]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage[colorlinks=true, linkcolor=blue, urlcolor=cyan]{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\title{MOOVIA | Reporte de Arquitectura Técnica y Algoritmos del Sensor}
+\author{Ingeniería de Software - MOOVIA App}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introducción}
+Este documento describe la arquitectura técnica de la plataforma MOOVIA para el seguimiento de levantamientos en halterofilia. El sistema utiliza un sensor IMU (Inertial Measurement Unit) ICM-42688-P controlado por un microcontrolador WBZ351 para capturar y procesar datos biocinemáticos en tiempo real.
+
+\section{Arquitectura del Software (Monorepo)}
+La solución está estructurada como un monorepo utilizando \textbf{npm workspaces}, lo que permite separar la lógica de negocio de la interfaz de usuario y compartir algoritmos entre diferentes plataformas (Mobile y Web).
+
+\begin{itemize}
+    \item \textbf{apps/mobile}: Aplicación React Native (Expo) que captura datos vía Bluetooth Low Energy (BLE).
+    \item \textbf{apps/web-test}: Herramienta de visualización técnica (Vite + TS) para validación de algoritmos offline.
+    \item \textbf{packages/sensor-core}: Paquete de TypeScript puro que contiene la lógica de procesamiento (Decoders, Madgwick, Kalman).
+\end{itemize}
+
+\section{Pipeline de Procesamiento de Datos}
+El flujo de datos sigue un proceso de múltiples etapas desde la captura hasta la obtención de métricas finales:
+
+\subsection{1. Captura y Decodificación (BLE)}
+El sensor envía paquetes de 211 bytes vía notificaciones BLE. Cada paquete contiene 15 muestras.
+\begin{itemize}
+    \item \textbf{Frecuencia (ODR)}: 1000 Hz (1 ms entre muestras).
+    \item \textbf{Formato}: Datos en \textit{little-endian int16}.
+    \item \textbf{Conversión Física}: Los valores crudos se convierten a unidades internacionales usando las resoluciones:
+    \begin{equation}
+        a_{physical} = \frac{a_{raw}}{4096} \, g, \quad w_{physical} = \frac{w_{raw}}{32.8} \, dps
+    \end{equation}
+\end{itemize}
+
+\subsection{2. Estimación de Orientación (Filtro Madgwick)}
+Para eliminar el componente de gravedad del acelerómetro y conocer la inclinación de la barra, se utiliza un filtro de orientación de Madgwick. Este filtro fusiona datos del giróscopo y acelerómetro para obtener un cuaternión de orientación estable, minimizando el drift.
+
+\subsection{3. Estimación de Cinemática (Filtro Kalman)}
+Se utiliza un filtro de Kalman de 3 estados por eje para estimar:
+\begin{equation}
+    x = [p, v, b]^T
+\end{equation}
+Donde $p$ es la posición, $v$ la velocidad y $b$ el bias del acelerómetro acumulado. El filtro aplica \textbf{ZUPT (Zero Velocity Update)} cuando detecta que el sensor está estacionario, corrigiendo el drift de integración.
+
+\section{Algoritmos de Métricas Propias}
+El \texttt{TrajectoryService.ts} calcula métricas clave para el entrenamiento de fuerza:
+
+\subsection{Velocidad Media Propulsiva (VMP)}
+Basado en los estudios de Sánchez-Medina y González-Badillo, la VMP es la media de la velocidad durante la fase concéntrica (subida) del levantamiento, excluyendo la fase de frenado donde la aceleración es menor que la gravedad.
+\begin{lstlisting}[language=Java]
+// Pseudocodigo del calculo de VMP
+if (vZ > 0.05 && aZ > -9.81) {
+    sumVelocity += vZ;
+    count++;
+}
+\end{lstlisting}
+
+\subsection{Aceleración Lineal Pico}
+Es el valor máximo de la magnitud del vector de aceleración lineal (sin gravedad) durante el movimiento.
+\begin{equation}
+    a_{peak} = \max \sqrt{a_x^2 + a_y^2 + a_z^2}
+\end{equation}
+
+\subsection{Altura Máxima}
+Diferencia máxima en la coordenada Z con respecto al punto de inicio del levantamiento, calculada tras re-procesar la trayectoria para eliminar bias.
+
+\section{Herramienta de Diagnóstico (Web Test Lab)}
+Permite a los ingenieros cargar archivos JSON grabados por la aplicación móvil. La herramienta recrea el procesamiento completo paso a paso, permitiendo visualizar:
+\begin{itemize}
+    \item Graficos de aceleración neta.
+    \item Integración de velocidad vertical.
+    \item Trayectoria 3D de la barra.
+\end{itemize}
+
+\section{Conclusión}
+La arquitectura desacoplada garantiza que las mejoras en el algoritmo de procesamiento en \texttt{sensor-core} se reflejen inmediatamente tanto en la herramienta de validación como en la aplicación móvil de producción.
+
+\end{document}

@@ -1,0 +1,13 @@
+\babel@toc {spanish}{}\relax 
+\contentsline {section}{\numberline {1}Introducción}{2}{section.1}%
+\contentsline {section}{\numberline {2}Arquitectura del Software (Monorepo)}{2}{section.2}%
+\contentsline {section}{\numberline {3}Pipeline de Procesamiento de Datos}{2}{section.3}%
+\contentsline {subsection}{\numberline {3.1}1. Captura y Decodificación (BLE)}{2}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}2. Estimación de Orientación (Filtro Madgwick)}{2}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}3. Estimación de Cinemática (Filtro Kalman)}{2}{subsection.3.3}%
+\contentsline {section}{\numberline {4}Algoritmos de Métricas Propias}{3}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Velocidad Media Propulsiva (VMP)}{3}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Aceleración Lineal Pico}{3}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Altura Máxima}{3}{subsection.4.3}%
+\contentsline {section}{\numberline {5}Herramienta de Diagnóstico (Web Test Lab)}{3}{section.5}%
+\contentsline {section}{\numberline {6}Conclusión}{3}{section.6}%

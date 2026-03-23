@@ -1,0 +1,14 @@
+{
+    "name": "@moovia/sensor-core",
+    "version": "1.0.0",
+    "description": "Shared sensor data types, decoders, and trajectory math for MOOVIA IMU",
+    "main": "src/index.ts",
+    "types": "src/index.ts",
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc -w"
+    },
+    "devDependencies": {
+        "typescript": "^5.0.0"
+    }
+}

@@ -18,6 +18,9 @@
         "paths": {
             "@moovia/domain": [
                 "packages/domain/src/index.ts"
+            ],
+            "@moovia/sensor-core": [
+                "packages/sensor-core/src/index.ts"
             ]
         }
     },

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MOOVIA | Sensor Test Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Outfit:wght@400;700;800&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="app">
+      <!-- App Shell -->
+      <nav class="glass scroll-hide">
+        <div class="logo">
+          <span class="m-icon">M</span>
+          <span class="brand">MOOVIA</span>
+          <span class="sep">/</span>
+          <span class="lab">SENSOR LAB</span>
+        </div>
+        <div class="actions">
+          <label for="file-upload" class="btn btn-primary">
+            <span class="icon">📂</span> Load JSON
+          </label>
+          <input id="file-upload" type="file" accept=".json" style="display: none;" />
+          <button id="reset-btn" class="btn btn-secondary">Reset</button>
+        </div>
+      </nav>
+
+      <main>
+        <div class="sidebar">
+          <div class="card info-card">
+            <h3>Session Info</h3>
+            <div id="session-meta" class="meta-list">
+              <p>No data loaded</p>
+            </div>
+          </div>
+          
+          <div class="card stats-card">
+            <h3>Calculated Metrics</h3>
+            <div class="metrics-grid">
+              <div class="metric">
+                <span class="label">V. Media Propulsiva</span>
+                <span id="vmp-value" class="value primary">---</span>
+                <span class="unit">m/s</span>
+              </div>
+              <div class="metric">
+                <span class="label">Acel. Pico</span>
+                <span id="acc-peak" class="value accent">---</span>
+                <span class="unit">m/s²</span>
+              </div>
+              <div class="metric">
+                <span class="label">Altura Máx.</span>
+                <span id="height-peak" class="value secondary">---</span>
+                <span class="unit">m</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabs-nav">
+            <button class="tab-btn active" data-tab="raw">🔬 Raw</button>
+            <button class="tab-btn" data-tab="processed">📊 Processed</button>
+            <button class="tab-btn" data-tab="analysis">🧪 Analysis</button>
+          </div>
+        </div>
+
+        <div class="content-area">
+          <div id="tab-raw" class="tab-pane active">
+            <div class="card plotter-card">
+              <h3>Raw Data Inspection</h3>
+              <div class="table-container">
+                <table id="raw-table">
+                  <thead>
+                    <tr>
+                      <th>TS (ms)</th>
+                      <th>ax</th>
+                      <th>ay</th>
+                      <th>az</th>
+                      <th>gx</th>
+                      <th>gy</th>
+                      <th>gz</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-muted);">Please load a JSON file</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div id="tab-processed" class="tab-pane">
+            <div class="grid-2">
+              <div class="card plotter-card">
+                <h3>Linear Acceleration (Gravity Removed)</h3>
+                <div class="canvas-container">
+                  <canvas id="accel-chart"></canvas>
+                </div>
+              </div>
+              <div class="card plotter-card">
+                <h3>Calculated Velocity</h3>
+                <div class="canvas-container">
+                  <canvas id="velocity-chart"></canvas>
+                </div>
+              </div>
+            </div>
+            <div class="card plotter-card mt-20">
+              <h3>Trajectory (Vertical Displacement)</h3>
+              <div class="canvas-container h-300">
+                <canvas id="position-chart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <div id="tab-analysis" class="tab-pane">
+            <div class="card plotter-card">
+              <h3>Kalman State Bias & Drift</h3>
+              <p class="text-muted">Coming soon...</p>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

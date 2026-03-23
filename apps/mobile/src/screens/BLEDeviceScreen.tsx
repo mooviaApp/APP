@@ -250,6 +250,24 @@ export function BLEDeviceScreen() {
                             </View>
 
                             <TouchableOpacity
+                                style={[styles.controlButton, { width: '100%', marginTop: 12, backgroundColor: '#333' }]}
+                                onPress={() => {
+                                    const rawData = trajectoryService.getRawData();
+                                    const json = JSON.stringify({
+                                        samples: [], // Placeholder for processed samples
+                                        rawData: rawData,
+                                        exportedAt: new Date().toISOString()
+                                    });
+                                    console.log('--- SESSION DATA EXPORT ---');
+                                    console.log(json);
+                                    console.log('---------------------------');
+                                    Alert.alert('Data Exported', 'JSON data printed to console. Copy it and save as session.json');
+                                }}
+                            >
+                                <Text style={styles.controlButtonText}>💾 Export Session JSON</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
                                 style={styles.disconnectButton}
                                 onPress={disconnect}
                             >
