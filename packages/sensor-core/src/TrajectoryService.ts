@@ -287,6 +287,14 @@ export class TrajectoryService {
     // Gravity estimation using low-pass filter (for instantaneous gravity compensation)
     private gravity_estimate: Vec3 = { x: 0, y: 0, z: 9.81 };
     private readonly GRAVITY_ALPHA = 0.98; // Low-pass filter coefficient (98% old, 2% new)
+    private lastIsStat: boolean = false;
+    // Bar sleeve spin compensation
+    private barAxis: Vec3 | null = null; // unit vector in sensor frame
+    private barAxisBuffer: Vec3[] = [];
+    private readonly BAR_AXIS_SAMPLES = 600; // ~0.6s @1kHz
+    // Rep state machine
+    private repState: 'IDLE' | 'MOVING' | 'APEX' | 'RETURN' = 'IDLE';
+    private maxLateral: number = 0;
 
     constructor(expectedHz: number = 1000) {
         this.setExpectedHz(expectedHz);
@@ -340,6 +348,12 @@ export class TrajectoryService {
         this.isStatState = false;
         // Reset gravity estimate to default [0, 0, 9.81]
         this.gravity_estimate = { x: 0, y: 0, z: this.GRAVITY };
+        // Reset bar spin estimation
+        this.barAxis = null;
+        this.barAxisBuffer = [];
+        // Reset rep tracking
+        this.repState = 'IDLE';
+        this.maxLateral = 0;
     }
 
     /** Reset only the kinematic state (position, velocity, kalman) while
@@ -391,11 +405,29 @@ export class TrajectoryService {
             y: sample.ay * this.GRAVITY,
             z: sample.az * this.GRAVITY,
         };
-        const w_meas: Vec3 = {
+        let w_meas: Vec3 = {
             x: sample.gx * (Math.PI / 180),
             y: sample.gy * (Math.PI / 180),
             z: sample.gz * (Math.PI / 180),
         };
+
+        // Collect gyro for bar-axis estimation (~0.6s inicial)
+        if (this.barAxisBuffer.length < this.BAR_AXIS_SAMPLES && !this.isCalibrating) {
+            this.barAxisBuffer.push({ ...w_meas });
+            if (this.barAxisBuffer.length === this.BAR_AXIS_SAMPLES) {
+                this.barAxis = this.estimateBarAxis(this.barAxisBuffer);
+            }
+        }
+
+        // Si tenemos eje de barra, eliminamos la componente de giro alrededor de él (spin de manga)
+        if (this.barAxis) {
+            const dot = w_meas.x * this.barAxis.x + w_meas.y * this.barAxis.y + w_meas.z * this.barAxis.z;
+            w_meas = {
+                x: w_meas.x - dot * this.barAxis.x,
+                y: w_meas.y - dot * this.barAxis.y,
+                z: w_meas.z - dot * this.barAxis.z
+            };
+        }
 
         // Initialize orientation using either calibration buffer or the
         // first sample. We require at least one sample of data to
@@ -513,15 +545,29 @@ export class TrajectoryService {
         this.madgwick.update(w_meas.x, w_meas.y, w_meas.z, a_meas.x, a_meas.y, a_meas.z, dt);
         this.q = { ...this.madgwick.q };
 
-        // NEW APPROACH: Instantaneous gravity estimation using low-pass filter
         // Rotate measured acceleration to world frame before gravity removal
         const a_world = QuatMath.rotate(this.q, a_meas);
 
-        // Update gravity estimate in world frame with exponential moving average
-        const alpha = this.GRAVITY_ALPHA;
+        // Outlier guard: descartar picos imposibles (>30 m/s^2)
+        const a_world_mag = Math.sqrt(a_world.x * a_world.x + a_world.y * a_world.y + a_world.z * a_world.z);
+        if (a_world_mag > 30) {
+            return this.getLastPoint(t);
+        }
+
+        // Adaptive gravity estimate: más lenta en reposo, más rápida en movimiento
+        const alpha = isStat ? this.GRAVITY_ALPHA : 0.7;
         this.gravity_estimate.x = alpha * this.gravity_estimate.x + (1 - alpha) * a_world.x;
         this.gravity_estimate.y = alpha * this.gravity_estimate.y + (1 - alpha) * a_world.y;
         this.gravity_estimate.z = alpha * this.gravity_estimate.z + (1 - alpha) * a_world.z;
+
+        // Re-normalizar la gravedad estimada a 9.81 para evitar deriva por magnitud
+        const gMag = Math.sqrt(this.gravity_estimate.x ** 2 + this.gravity_estimate.y ** 2 + this.gravity_estimate.z ** 2);
+        if (gMag > 1e-3) {
+            const scale = 9.81 / gMag;
+            this.gravity_estimate.x *= scale;
+            this.gravity_estimate.y *= scale;
+            this.gravity_estimate.z *= scale;
+        }
 
         // Compute linear acceleration in world frame by subtracting estimated gravity
         const acc_net = {
@@ -529,6 +575,12 @@ export class TrajectoryService {
             y: a_world.y - this.gravity_estimate.y,
             z: a_world.z - this.gravity_estimate.z
         };
+
+        // Clip pequeños offsets para limitar drift acumulado
+        const clip = (v: number, thresh = 0.005) => Math.abs(v) < thresh ? 0 : v;
+        acc_net.x = clip(acc_net.x);
+        acc_net.y = clip(acc_net.y);
+        acc_net.z = clip(acc_net.z);
 
         // Integrate kinematics via Kalman
         if (!isStat) {
@@ -539,12 +591,19 @@ export class TrajectoryService {
             this.kX.predict(acc_net.x, dt); this.kX.updateZUPT(acc_net.x);
             this.kY.predict(acc_net.y, dt); this.kY.updateZUPT(acc_net.y);
             this.kZ.predict(acc_net.z, dt); this.kZ.updateZUPT(acc_net.z);
+            // Zero velocity explicitly en reposo
+            this.v = Vec3Math.zero();
+            // Baseline posición al estabilizar para limitar offset
+            this.baselineP = { ...this.p };
         }
 
         // Update position and velocity from Kalman filters
         this.p = { x: this.kX.getPosition(), y: this.kY.getPosition(), z: this.kZ.getPosition() };
         this.v = { x: this.kX.getVelocity(), y: this.kY.getVelocity(), z: this.kZ.getVelocity() };
         const relP = Vec3Math.sub(this.p, this.baselineP);
+        // Track lateral deviation (sqrt(x^2 + y^2))
+        const lateral = Math.sqrt(relP.x * relP.x + relP.y * relP.y);
+        if (lateral > this.maxLateral) this.maxLateral = lateral;
 
         // Record raw data for offline analysis
         this.rawDataBuffer.push({ timestamp: t, acc_net, q: { ...this.q }, p_raw: { ...this.p }, v_raw: { ...this.v } });
@@ -580,6 +639,12 @@ export class TrajectoryService {
             relativePosition: relP,
         };
 
+        // Re-baseline al salir de estacionario para eliminar offset acumulado
+        if (this.lastIsStat && !isStat) {
+            this.baselineP = { ...this.p };
+        }
+        this.lastIsStat = isStat;
+
         // Always update lastPoint even if not emitting to UI
         this.lastPoint = point;
 
@@ -595,6 +660,7 @@ export class TrajectoryService {
 
         // Append to path for realtime UI
         this.path.push(point);
+        this.updateRepState(point);
         return point;
     }
 
@@ -626,6 +692,44 @@ export class TrajectoryService {
         this.gyroBuffer.push(w_mag);
         if (this.accelBuffer.length > this.bufferSize) this.accelBuffer.shift();
         if (this.gyroBuffer.length > this.bufferSize) this.gyroBuffer.shift();
+    }
+
+    /** Estima el eje principal de giro (barAxis) a partir de muestras de gyro. */
+    private estimateBarAxis(buf: Vec3[]): Vec3 {
+        // Media de omega
+        let sx = 0, sy = 0, sz = 0;
+        buf.forEach(w => { sx += w.x; sy += w.y; sz += w.z; });
+        const n = buf.length || 1;
+        const axis = Vec3Math.normalize({ x: sx / n, y: sy / n, z: sz / n });
+        // Fallback si norma ~0
+        const norm = Vec3Math.norm(axis);
+        if (norm < 1e-3) return { x: 0, y: 0, z: 1 };
+        return axis;
+    }
+
+    /** Actualiza máquina de estados de repetición para consolidar métricas al cerrar ciclo. */
+    private updateRepState(pt: TrajectoryPoint) {
+        const vz = this.v.z;
+        const moving = Math.abs(vz) > 0.05;
+
+        switch (this.repState) {
+            case 'IDLE':
+                if (moving) this.repState = 'MOVING';
+                break;
+            case 'MOVING':
+                if (vz <= 0) this.repState = 'APEX';
+                break;
+            case 'APEX':
+                if (vz < -0.05) this.repState = 'RETURN';
+                break;
+            case 'RETURN':
+                if (this.isStatState) {
+                    // Al cerrar rep en reposo, fijar baseline para siguiente rep
+                    this.baselineP = { ...this.p };
+                    this.repState = 'IDLE';
+                }
+                break;
+        }
     }
 
     /** Determine whether the sensor is currently stationary based on
@@ -857,6 +961,11 @@ export class TrajectoryService {
             }
         }
         return maxZ;
+    }
+
+    /** Desviación lateral máxima (plano X-Y relativo). */
+    public getMaxLateral(): number {
+        return this.maxLateral;
     }
 }
 

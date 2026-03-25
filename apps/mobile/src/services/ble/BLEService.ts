@@ -58,6 +58,8 @@ export class BLEService {
     private reconnectAttempts = 0;
     private sampleBuffer: IMUSample[] = [];
     private readonly MAX_BUFFER_SAMPLES = SENSOR_CONFIG.BATCH_SIZE_SAMPLES * 10;
+    // Buffer is solo para el warmup inicial; después se desactiva para evitar crecimiento
+    private bufferingEnabled = false;
 
     constructor() {
         this.manager = new BleManager();
@@ -403,13 +405,26 @@ export class BLEService {
                 // It's an array of IMU samples (15 samples per packet)
                 const samples = decoded as IMUSample[];
 
-                // Add all samples to buffer
-                this.sampleBuffer.push(...samples);
-
                 // Process samples for trajectory (All samples needed for integration)
                 samples.forEach(sample => {
                     trajectoryService.processSample(sample);
                 });
+
+                // Buffer solo durante el warmup (para contar paquetes iniciales)
+                if (this.bufferingEnabled) {
+                    this.sampleBuffer.push(...samples);
+
+                    // Check if buffer is full (ready to send to backend)
+                    if (this.sampleBuffer.length >= SENSOR_CONFIG.BATCH_SIZE_SAMPLES) {
+                        // Note: Backend transmission will be handled by the hook/component
+                        // We just keep the buffer here
+                    }
+
+                    // Prevent unbounded growth when not flushed by a backend
+                    if (this.sampleBuffer.length > this.MAX_BUFFER_SAMPLES) {
+                        this.sampleBuffer.splice(0, this.sampleBuffer.length - this.MAX_BUFFER_SAMPLES);
+                    }
+                }
 
                 // Emit only the last sample for real-time display
                 if (samples.length > 0) {
@@ -417,17 +432,6 @@ export class BLEService {
                         type: 'dataReceived',
                         data: { sample: samples[samples.length - 1] },
                     });
-                }
-
-                // Check if buffer is full (ready to send to backend)
-                if (this.sampleBuffer.length >= SENSOR_CONFIG.BATCH_SIZE_SAMPLES) {
-                    // Note: Backend transmission will be handled by the hook/component
-                    // We just keep the buffer here
-                }
-
-                // Prevent unbounded growth when not flushed by a backend
-                if (this.sampleBuffer.length > this.MAX_BUFFER_SAMPLES) {
-                    this.sampleBuffer.splice(0, this.sampleBuffer.length - this.MAX_BUFFER_SAMPLES);
                 }
             }
         } catch (error) {
@@ -503,6 +507,7 @@ export class BLEService {
      * Start streaming data
      */
     async startStreaming(): Promise<void> {
+        this.bufferingEnabled = true; // enable warm-up buffering
         this.sampleBuffer = []; // Clear buffer
         // Reset timestamp continuity for a fresh streaming session
         resetIMUTimestampContinuity();
@@ -517,6 +522,8 @@ export class BLEService {
      * Stop streaming data
      */
     async stopStreaming(): Promise<void> {
+        this.bufferingEnabled = false;
+        this.sampleBuffer = [];
         await this.sendCommand(BLE_COMMANDS.STREAM_OFF);
         trajectoryService.setRealtimeEnabled(false);
         trajectoryService.applyPostProcessingCorrections();
@@ -526,12 +533,22 @@ export class BLEService {
      * Reset the IMU sensor
      */
     async resetIMU(): Promise<void> {
+        this.bufferingEnabled = false;
+        this.sampleBuffer = [];
         await this.sendCommand(BLE_COMMANDS.RESET_IMU);
     }
 
     // ==========================================================================
     // Data Access
     // ==========================================================================
+
+    /**
+     * Stop buffering samples to avoid growth once warmup is done.
+     */
+    stopBuffering() {
+        this.bufferingEnabled = false;
+        this.sampleBuffer = [];
+    }
 
     /**
      * Get buffered samples and clear buffer

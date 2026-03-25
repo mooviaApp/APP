@@ -1,4 +1,4 @@
-/**
+﻿/**
  * BLE Device Screen
  * 
  * Main screen for managing BLE connection to MOOVIA sensor.
@@ -15,7 +15,6 @@ import {
     ActivityIndicator,
     ScrollView,
     Alert,
-    Share,
 } from 'react-native';
 import { Device } from 'react-native-ble-plx';
 // type Device = any; // Mock type for Device since library is removed
@@ -23,6 +22,8 @@ import { useBLE } from '../hooks/useBLE';
 import { SensorDataCard } from '../components/SensorDataCard';
 import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
 import { SENSOR_CONFIG } from '../services/ble/constants';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 
 const COLORS = {
     primary: '#501FF0',
@@ -41,6 +42,7 @@ export function BLEDeviceScreen() {
     const [peakAcceleration, setPeakAcceleration] = useState<number | null>(null);
     const [meanPropulsiveVelocity, setMeanPropulsiveVelocity] = useState<number | null>(null);
     const [maxHeight, setMaxHeight] = useState<number | null>(null);
+    const [maxLateral, setMaxLateral] = useState<number | null>(null);
 
     const {
         isScanning,
@@ -68,6 +70,7 @@ export function BLEDeviceScreen() {
         setPeakAcceleration(null); // Clear previous peak acceleration
         setMeanPropulsiveVelocity(null);
         setMaxHeight(null);
+        setMaxLateral(null);
         await startStreaming();
     };
 
@@ -78,21 +81,23 @@ export function BLEDeviceScreen() {
             console.log('[UI] Stream stopped. Updating graph path with ' + points + ' points');
             setFinalPath([...trajectoryService.getPath()]);
 
-            // Obtener métricas después del post-processing
+            // Obtener mÃ©tricas despuÃ©s del post-processing
             const peakAcc = trajectoryService.getPeakLinearAcceleration();
             const vmp = trajectoryService.getMeanPropulsiveVelocity();
             const height = trajectoryService.getMaxHeight();
+            const lateral = trajectoryService.getMaxLateral();
 
             setPeakAcceleration(peakAcc);
             setMeanPropulsiveVelocity(vmp);
             setMaxHeight(height);
+            setMaxLateral(lateral);
 
-            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/s², VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m`);
+            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/sÂ², VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
 
             // DEBUG ALERT: Confirm data quantity to user
             Alert.alert(
                 "Resultados del Levantamiento",
-                `VMP: ${vmp.toFixed(2)} m/s\nAceleración Pico: ${peakAcc.toFixed(2)} m/s²\nAltura Máxima: ${height.toFixed(2)} m`
+                `VMP: ${vmp.toFixed(2)} m/s\nAceleraciÃ³n Pico: ${peakAcc.toFixed(2)} m/sÂ²\nAltura MÃ¡xima: ${height.toFixed(2)} m\nDesviaciÃ³n Lateral: ${lateral.toFixed(2)} m`
             );
         } catch (e: any) {
             Alert.alert("Error", "Failed to stop stream: " + e.message);
@@ -131,7 +136,7 @@ export function BLEDeviceScreen() {
             const rawData = trajectoryService.getRawData();
             const trajectory = finalPath.length > 0 ? finalPath : trajectoryService.getPath();
             if (rawData.length === 0 && trajectory.length === 0) {
-                Alert.alert('Sin datos', 'No hay muestras registradas aún.');
+                Alert.alert('Sin datos', 'No hay muestras registradas aÃºn.');
                 return;
             }
 
@@ -144,15 +149,25 @@ export function BLEDeviceScreen() {
             };
 
             const json = JSON.stringify(payload, null, 2);
+            const filename = `moovia-session-${Date.now()}.json`;
+            const fileUri = FileSystem.cacheDirectory + filename;
 
-            // Mostrar hoja de compartido nativa con el JSON
-            await Share.share({
-                title: 'MOOVIA session export',
-                message: json,
+            // Nota: omitir encoding para evitar accesos a EncodingType inexistente en algunas builds
+            await FileSystem.writeAsStringAsync(fileUri, json);
+
+            const canShare = await Sharing.isAvailableAsync();
+            if (!canShare) {
+                Alert.alert('Exportado en local', `Archivo guardado en cache:\n${fileUri}`);
+                return;
+            }
+
+            await Sharing.shareAsync(fileUri, {
+                mimeType: 'application/json',
+                dialogTitle: 'MOOVIA session export',
             });
         } catch (err: any) {
             console.error('Export failed', err);
-            Alert.alert('Error', 'No se pudo exportar la sesión: ' + err.message);
+            Alert.alert('Error', 'No se pudo exportar la sesiÃ³n: ' + err.message);
         }
     };
 
@@ -204,7 +219,7 @@ export function BLEDeviceScreen() {
                                 whoAmI.isValid ? styles.whoAmIValid : styles.whoAmIInvalid
                             ]}>
                                 0x{whoAmI.value.toString(16).toUpperCase()}
-                                {whoAmI.isValid ? ' ✓' : ' ✗'}
+                                {whoAmI.isValid ? ' âœ“' : ' âœ—'}
                             </Text>
                         </View>
                     )}
@@ -262,7 +277,7 @@ export function BLEDeviceScreen() {
                                     label="Stream On"
                                     onPress={handleStartStreaming}
                                     color={COLORS.success}
-                                    icon="▶"
+                                    icon="â–¶"
                                 />
                             </View>
 
@@ -271,13 +286,13 @@ export function BLEDeviceScreen() {
                                     label="Stream Off"
                                     onPress={handleStopStreaming}
                                     color={COLORS.warning}
-                                    icon="■"
+                                    icon="â– "
                                 />
                                 <ControlButton
                                     label="Hard Reset"
                                     onPress={resetIMU}
                                     color={COLORS.danger}
-                                    icon="🔌"
+                                    icon="ðŸ”Œ"
                                 />
                             </View>
 
@@ -285,7 +300,7 @@ export function BLEDeviceScreen() {
                                 style={[styles.controlButton, { width: '100%', marginTop: 12, backgroundColor: '#333' }]}
                                 onPress={handleExportSession}
                             >
-                                <Text style={styles.controlButtonText}>💾 Export Session JSON</Text>
+                                <Text style={styles.controlButtonText}>ðŸ’¾ Export Session JSON</Text>
                             </TouchableOpacity>
 
                             <TouchableOpacity
@@ -318,21 +333,29 @@ export function BLEDeviceScreen() {
 
                                 {maxHeight !== null && (
                                     <View style={[styles.metricCard, { borderColor: COLORS.primary }]}>
-                                        <Text style={styles.metricLabel}>Altura Máxima</Text>
+                                        <Text style={styles.metricLabel}>Altura MÃ¡xima</Text>
                                         <Text style={[styles.metricValue, { color: COLORS.primary }]}>
                                             {maxHeight.toFixed(2)}
                                         </Text>
                                         <Text style={styles.metricUnit}>m</Text>
                                     </View>
                                 )}
-
+                                {maxLateral !== null && (
+                                    <View style={[styles.metricCard, { borderColor: COLORS.warning }]}>
+                                        <Text style={styles.metricLabel}>DesviaciÃ³n Lateral</Text>
+                                        <Text style={[styles.metricValue, { color: COLORS.warning }]}>
+                                            {maxLateral.toFixed(2)}
+                                        </Text>
+                                        <Text style={styles.metricUnit}>m</Text>
+                                    </View>
+                                )}
                                 {peakAcceleration !== null && (
                                     <View style={[styles.metricCard, { borderColor: COLORS.accent }]}>
                                         <Text style={styles.metricLabel}>Acel. Lineal Pico</Text>
                                         <Text style={[styles.metricValue, { color: COLORS.accent }]}>
                                             {peakAcceleration.toFixed(2)}
                                         </Text>
-                                        <Text style={styles.metricUnit}>m/s²</Text>
+                                        <Text style={styles.metricUnit}>m/sÂ²</Text>
                                     </View>
                                 )}
                             </View>
@@ -639,3 +662,4 @@ const styles = StyleSheet.create({
         marginTop: 2,
     },
 });
+

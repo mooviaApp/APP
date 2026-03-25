@@ -115,6 +115,10 @@ function updateChartsFromRaw(rawData: any[]) {
     charts.position.data.labels = rawData.map((_, i) => i);
     charts.position.data.datasets[0].data = rawData.map(d => d.p_raw.z);
     charts.position.update();
+
+    // Path 2D (X vs Z)
+    charts.path2d.data.datasets[0].data = rawData.map(d => ({ x: d.p_raw.x, y: d.p_raw.z }));
+    charts.path2d.update();
 }
 
 function processData() {
@@ -214,6 +218,23 @@ function setupCharts() {
         ]},
         options: { ...commonOptions, plugins: { legend: { display: true, labels: { color: '#fff' } } } }
     });
+
+    charts.path2d = new Chart(document.getElementById('path-2d-chart') as HTMLCanvasElement, {
+        type: 'scatter',
+        data: { datasets: [
+            { label: 'X vs Z', data: [], borderColor: '#1DF09F', borderWidth: 2, showLine: true, pointRadius: 0 }
+        ]},
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 0 },
+            scales: {
+                x: { title: { display: true, text: 'Lateral (m)', color: '#ccc' }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#ccc' } },
+                y: { title: { display: true, text: 'Vertical Z (m)', color: '#ccc' }, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#ccc' } }
+            },
+            plugins: { legend: { display: true, labels: { color: '#fff' } } }
+        }
+    });
 }
 
 function updateCharts() {
@@ -236,6 +257,9 @@ function updateCharts() {
     charts.position.data.labels = path.map((_, i) => i);
     charts.position.data.datasets[0].data = path.map(d => d.relativePosition.z);
     charts.position.update();
+
+    charts.path2d.data.datasets[0].data = path.map(p => ({ x: p.relativePosition.x, y: p.relativePosition.z }));
+    charts.path2d.update();
 }
 
 init();

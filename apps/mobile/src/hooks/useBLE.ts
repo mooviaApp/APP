@@ -276,6 +276,9 @@ export function useBLE(): UseBLEResult {
                 console.log(`[STREAM] ✅ Received ${samplesReceived} samples`);
             }
 
+            // Stop buffering to avoid growth; realtime pipeline no longer needs raw buffer
+            bleService.stopBuffering();
+
             // Step 4: Calibrate Sensor
             console.log('[STREAM] Step 4/5: Calibrating sensor biases...');
             try {

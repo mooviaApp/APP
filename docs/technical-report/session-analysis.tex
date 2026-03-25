@@ -1,0 +1,91 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{siunitx}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+
+\title{Cálculo de trayectorias y métricas en levantamientos verticales}
+\author{MOOVIA Sensor Lab}
+\date{Marzo 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Objetivo}
+Describir paso a paso cómo el pipeline convierte las muestras crudas del IMU en aceleración lineal, velocidad, desplazamiento vertical y métricas (aceleración pico, velocidad media propulsiva y altura máxima) usadas en el panel \emph{Processed}.
+
+\section{Entrada y reconstrucción temporal}
+\begin{itemize}[leftmargin=12pt]
+  \item Cada paquete BLE trae 15 muestras (\(ax, ay, az, gx, gy, gz, hwTs\)) a \SI{1}{kHz}.
+  \item Para cada paquete, se reconstruye el tiempo absoluto:
+  \[
+    \Delta t = \frac{\Delta \text{ticks} \times 32/30\ \mu s}{1000}, \qquad
+    t_i = t_{i+1} - \Delta t
+  \]
+  usando wrap-around de 16 bits. El último timestamp del paquete se ancla al reloj del sistema si hay huecos \(>\) \SI{1}{s}.
+\end{itemize}
+
+\section{Calibración inicial}
+\begin{itemize}[leftmargin=12pt]
+  \item Durante \(\approx\) \SI{2}{s} en reposo se promedian las aceleraciones crudas.
+  \item Se construye un cuaternión \(q_0\) que alinea ese vector con el eje \(+Z\) del mundo (gravedad abajo). Se reinician cinemática y filtros.
+\end{itemize}
+
+\section{Transformación a marco mundo y compensación de gravedad}
+\begin{enumerate}[leftmargin=14pt]
+  \item Convertir aceleración a \(\text{m/s}^2\): \(a_b = (ax, ay, az)\cdot 9.81\).
+  \item Rotar al marco mundo con el cuaternión actual \(q\) (sensor\(\rightarrow\)mundo):
+  \[
+    a_w = q \otimes a_b \otimes q^{-1}
+  \]
+  \item Estimar gravedad con filtro exponencial (coef. \(\alpha=0.98\)):
+  \[
+    g_{est} = \alpha\, g_{est} + (1-\alpha)\, a_w
+  \]
+  \item Aceleración lineal:
+  \[
+    a_{lin} = a_w - g_{est}
+  \]
+\end{enumerate}
+
+\section{Integración con filtros Kalman 1D}
+Para cada eje \(x,y,z\) se usa un estado \(x = [p,\ v,\ b]^T\) (posición, velocidad, sesgo de acelerómetro):
+\begin{align*}
+  \text{Predicción: } & 
+  v_{k+1} = v_k + (a_{lin}-b_k)\,\Delta t,\\
+  p_{k+1} = p_k + v_k\,\Delta t + \tfrac{1}{2}(a_{lin}-b_k)\Delta t^2.\\
+  \text{Actualización (si está parado): } &
+  v = 0,\quad b = a_{lin} \quad (\text{ZUPT + bias}).
+\end{align*}
+La detección de reposo usa ventanas deslizantes: \(|a|\) cerca de \(g\), \(\text{std}(a) < 0.15\ \text{m/s}^2\), \(\text{std}(\omega) < 0.05\ \text{rad/s}\) con histéresis (entrada 300 ms, salida 100 ms).
+
+\section{Trayectoria y orientación para la UI}
+\begin{itemize}[leftmargin=12pt]
+  \item Se acumulan puntos \((t, p, v, q)\); para la vista frontal se aplica la rotación fija de montura y el ajuste \(-90^\circ\) en \(X\) (convertir mundo \(Z\uparrow\) a UI \(Y\uparrow\)).
+  \item Al detener el stream se reprocesan todos los datos crudos para reconstruir la trayectoria relativa al primer punto (baseline).
+\end{itemize}
+
+\section{Métricas mostradas}
+\begin{itemize}[leftmargin=12pt]
+  \item \textbf{Aceleración Pico}: \(\max_t \|a_{lin}(t)\|\) en \(\text{m/s}^2\).
+  \item \textbf{V. Media Propulsiva}: media de \(v_z(t)\) durante la fase concéntrica (\(v_z > 0.05\ \text{m/s}\)).
+  \item \textbf{Altura Máx}: \(\max_t (p_z(t) - p_z(0))\) tras el reprocesado offline.
+\end{itemize}
+
+\section{Cómo reproducir el análisis}
+\begin{enumerate}[leftmargin=14pt]
+  \item Exporta la sesión desde la app móvil (JSON).
+  \item Abre \texttt{apps/web-test} con Vite y pulsa \texttt{Load JSON}.
+  \item La web usa el mismo pipeline descrito arriba para graficar aceleración, velocidad y desplazamiento vertical.
+\end{enumerate}
+
+\section*{Notas para levantamientos verticales}
+\begin{itemize}[leftmargin=12pt]
+  \item Asegura 1--2 s en reposo al inicio para que la calibración capture la gravedad correctamente.
+  \item Evita huecos de transmisión: si \(\Delta t > 50\ \text{ms}\) se congela la integración hasta que vuelvan muestras estables.
+  \item Revisa el gráfico de velocidad: un perfil limpio ascenso--descenso debe ser simétrico; picos espurios suelen venir de golpes o drift si no hubo reposo suficiente.
+\end{itemize}
+
+\end{document}
