@@ -15,12 +15,14 @@ import {
     ActivityIndicator,
     ScrollView,
     Alert,
+    Share,
 } from 'react-native';
 import { Device } from 'react-native-ble-plx';
 // type Device = any; // Mock type for Device since library is removed
 import { useBLE } from '../hooks/useBLE';
 import { SensorDataCard } from '../components/SensorDataCard';
 import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
+import { SENSOR_CONFIG } from '../services/ble/constants';
 
 const COLORS = {
     primary: '#501FF0',
@@ -123,6 +125,36 @@ export function BLEDeviceScreen() {
             <Text style={styles.logMessage}>{item.message}</Text>
         </View>
     );
+
+    const handleExportSession = async () => {
+        try {
+            const rawData = trajectoryService.getRawData();
+            const trajectory = finalPath.length > 0 ? finalPath : trajectoryService.getPath();
+            if (rawData.length === 0 && trajectory.length === 0) {
+                Alert.alert('Sin datos', 'No hay muestras registradas aún.');
+                return;
+            }
+
+            const payload = {
+                version: '1.0.0',
+                exportedAt: new Date().toISOString(),
+                sensorConfig: SENSOR_CONFIG,
+                trajectory,
+                rawData,
+            };
+
+            const json = JSON.stringify(payload, null, 2);
+
+            // Mostrar hoja de compartido nativa con el JSON
+            await Share.share({
+                title: 'MOOVIA session export',
+                message: json,
+            });
+        } catch (err: any) {
+            console.error('Export failed', err);
+            Alert.alert('Error', 'No se pudo exportar la sesión: ' + err.message);
+        }
+    };
 
     // ==========================================================================
     // Main Render
@@ -251,18 +283,7 @@ export function BLEDeviceScreen() {
 
                             <TouchableOpacity
                                 style={[styles.controlButton, { width: '100%', marginTop: 12, backgroundColor: '#333' }]}
-                                onPress={() => {
-                                    const rawData = trajectoryService.getRawData();
-                                    const json = JSON.stringify({
-                                        samples: [], // Placeholder for processed samples
-                                        rawData: rawData,
-                                        exportedAt: new Date().toISOString()
-                                    });
-                                    console.log('--- SESSION DATA EXPORT ---');
-                                    console.log(json);
-                                    console.log('---------------------------');
-                                    Alert.alert('Data Exported', 'JSON data printed to console. Copy it and save as session.json');
-                                }}
+                                onPress={handleExportSession}
                             >
                                 <Text style={styles.controlButtonText}>💾 Export Session JSON</Text>
                             </TouchableOpacity>
