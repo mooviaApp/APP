@@ -514,18 +514,20 @@ export class TrajectoryService {
         this.q = { ...this.madgwick.q };
 
         // NEW APPROACH: Instantaneous gravity estimation using low-pass filter
-        // Update gravity estimate with exponential moving average
-        const alpha = this.GRAVITY_ALPHA;
-        this.gravity_estimate.x = alpha * this.gravity_estimate.x + (1 - alpha) * a_meas.x;
-        this.gravity_estimate.y = alpha * this.gravity_estimate.y + (1 - alpha) * a_meas.y;
-        this.gravity_estimate.z = alpha * this.gravity_estimate.z + (1 - alpha) * a_meas.z;
+        // Rotate measured acceleration to world frame before gravity removal
+        const a_world = QuatMath.rotate(this.q, a_meas);
 
-        // Compute linear acceleration by subtracting estimated gravity (already in m/s²)
-        // This approach does NOT depend on accumulated orientation, avoiding drift issues
+        // Update gravity estimate in world frame with exponential moving average
+        const alpha = this.GRAVITY_ALPHA;
+        this.gravity_estimate.x = alpha * this.gravity_estimate.x + (1 - alpha) * a_world.x;
+        this.gravity_estimate.y = alpha * this.gravity_estimate.y + (1 - alpha) * a_world.y;
+        this.gravity_estimate.z = alpha * this.gravity_estimate.z + (1 - alpha) * a_world.z;
+
+        // Compute linear acceleration in world frame by subtracting estimated gravity
         const acc_net = {
-            x: a_meas.x - this.gravity_estimate.x,
-            y: a_meas.y - this.gravity_estimate.y,
-            z: a_meas.z - this.gravity_estimate.z
+            x: a_world.x - this.gravity_estimate.x,
+            y: a_world.y - this.gravity_estimate.y,
+            z: a_world.z - this.gravity_estimate.z
         };
 
         // Integrate kinematics via Kalman
@@ -550,7 +552,7 @@ export class TrajectoryService {
         // Throttled logging: every ~50 samples (~20 Hz at 1000 Hz ODR)
         this.logCounter++;
         if (this.logCounter % 50 === 0) {
-            const aMag = Math.sqrt(a_meas.x ** 2 + a_meas.y ** 2 + a_meas.z ** 2);
+            const aMag = Math.sqrt(a_world.x ** 2 + a_world.y ** 2 + a_world.z ** 2);
             const accLinMag = Math.sqrt(acc_net.x ** 2 + acc_net.y ** 2 + acc_net.z ** 2);
             const gEst = Math.sqrt(this.gravity_estimate.x ** 2 + this.gravity_estimate.y ** 2 + this.gravity_estimate.z ** 2);
             console.log(
@@ -729,8 +731,12 @@ export class TrajectoryService {
             this.madgwick.setQuaternion(qInit);
             this.isOrientationInitialized = true;
             console.log('[Hybrid] Calibration complete. Orientation initialised.');
+            // Anchor timestamp to last calibration sample to avoid \"large gap\" reset on next packet
+            const lastCalTs = this.calibrationBuffer[this.calibrationBuffer.length - 1]?.timestampMs;
+            this.lastTimestamp = lastCalTs ?? Date.now();
         } else {
             console.warn('[Hybrid] Calibration complete but no samples collected. Orientation will be initialised on next sample.');
+            this.lastTimestamp = Date.now();
         }
         // Reset kinematics after calibration but preserve raw data buffer
         this.resetKinematics();

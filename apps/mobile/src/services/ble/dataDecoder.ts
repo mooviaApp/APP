@@ -7,7 +7,7 @@
  * Updated for firmware v2: 15 samples per packet at 1 kHz ODR
  */
 
-import { decode as base64Decode } from 'base-64';
+import { decode as base64Decode, encode as base64Encode } from 'base-64';
 import {
     IMUSample,
     LogMessage,
@@ -351,5 +351,6 @@ export function encodeCommand(command: number): string {
     for (let i = 0; i < bytes.length; i++) {
         binary += String.fromCharCode(bytes[i]);
     }
-    return btoa(binary);
+    // Use base-64 polyfill compatible with Hermes/Expo (btoa is not available)
+    return base64Encode(binary);
 }

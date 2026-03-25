@@ -57,6 +57,7 @@ export class BLEService {
     private isScanning = false;
     private reconnectAttempts = 0;
     private sampleBuffer: IMUSample[] = [];
+    private readonly MAX_BUFFER_SAMPLES = SENSOR_CONFIG.BATCH_SIZE_SAMPLES * 10;
 
     constructor() {
         this.manager = new BleManager();
@@ -422,6 +423,11 @@ export class BLEService {
                 if (this.sampleBuffer.length >= SENSOR_CONFIG.BATCH_SIZE_SAMPLES) {
                     // Note: Backend transmission will be handled by the hook/component
                     // We just keep the buffer here
+                }
+
+                // Prevent unbounded growth when not flushed by a backend
+                if (this.sampleBuffer.length > this.MAX_BUFFER_SAMPLES) {
+                    this.sampleBuffer.splice(0, this.sampleBuffer.length - this.MAX_BUFFER_SAMPLES);
                 }
             }
         } catch (error) {

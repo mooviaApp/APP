@@ -8,22 +8,24 @@
     "ios": "expo run:ios"
   },
   "dependencies": {
+    "@moovia/sensor-core": "*",
     "at-least-node": "^1.0.0",
     "base-64": "^1.0.0",
-    "expo": "52.0.47",
-    "expo-status-bar": "~2.0.1",
-    "expo-system-ui": "~4.0.7",
-    "react": "18.3.1",
-    "react-native": "0.76.9",
+    "expo": "~54.0.0",
+    "expo-dev-client": "~6.0.20",
+    "expo-status-bar": "~3.0.9",
+    "expo-system-ui": "~6.0.9",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
     "react-native-ble-plx": "^3.5.0",
-    "react-native-svg": "15.8.0",
-    "@moovia/sensor-core": "*"
+    "react-native-svg": "15.12.1",
+    "vite": "8.0.2"
   },
   "devDependencies": {
     "@react-native-community/cli": "^20.0.2",
     "@types/base-64": "^1.0.2",
-    "@types/react": "~18.3.12",
-    "typescript": "~5.3.3"
+    "@types/react": "~19.1.10",
+    "typescript": "~5.9.2"
   },
   "private": true
 }
