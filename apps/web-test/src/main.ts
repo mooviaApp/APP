@@ -18,6 +18,8 @@ const fileInput = document.getElementById('file-upload') as HTMLInputElement;
 const vmpEl = document.getElementById('vmp-value') as HTMLElement;
 const accPeakEl = document.getElementById('acc-peak') as HTMLElement;
 const heightPeakEl = document.getElementById('height-peak') as HTMLElement;
+const lateralMaxEl = document.getElementById('lateral-max') as HTMLElement;
+const lateralFinalEl = document.getElementById('lateral-final') as HTMLElement;
 const sessionMetaEl = document.getElementById('session-meta') as HTMLElement;
 const rawTableBody = document.querySelector('#raw-table tbody') as HTMLElement;
 const tabBtns = document.querySelectorAll('.tab-btn');
@@ -145,10 +147,14 @@ function updateMetrics() {
     const vmp = trajectoryService.getMeanPropulsiveVelocity();
     const peakAcc = trajectoryService.getPeakLinearAcceleration();
     const maxHeight = trajectoryService.getMaxHeight();
+    const maxLateral = trajectoryService.getMaxLateral();
+    const finalLateral = trajectoryService.getFinalLateral();
 
     vmpEl.innerText = vmp.toFixed(2);
     accPeakEl.innerText = peakAcc.toFixed(2);
     heightPeakEl.innerText = maxHeight.toFixed(2);
+    lateralMaxEl.innerText = maxLateral.toFixed(2);
+    lateralFinalEl.innerText = finalLateral.toFixed(2);
 }
 
 function updateMeta() {

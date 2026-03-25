@@ -265,6 +265,11 @@ export class TrajectoryService {
     private stationaryTick: number = 0;
     private movingTick: number = 0;
     private isStatState: boolean = false;
+    // Yaw locking when spin cae por debajo de umbral (reduce deriva lateral)
+    private yawLocked: boolean = false;
+    private yawLockValue: number = 0; // rad
+    private readonly YAW_LOCK_LOW = 5 * Math.PI / 180;   // 5 dps
+    private readonly YAW_LOCK_HIGH = 15 * Math.PI / 180; // hysteresis release
     // Logging counter to throttle console output
     private logCounter: number = 0;
     // Raw data buffer for offline post‑processing
@@ -346,6 +351,8 @@ export class TrajectoryService {
         this.stationaryTick = 0;
         this.movingTick = 0;
         this.isStatState = false;
+        this.yawLocked = false;
+        this.yawLockValue = 0;
         // Reset gravity estimate to default [0, 0, 9.81]
         this.gravity_estimate = { x: 0, y: 0, z: this.GRAVITY };
         // Reset bar spin estimation
@@ -507,6 +514,7 @@ export class TrajectoryService {
         }
 
         // Update sliding buffers for stationary detection
+        const w_mag = Math.sqrt(w_meas.x * w_meas.x + w_meas.y * w_meas.y + w_meas.z * w_meas.z);
         this.updateBuffers(a_meas, w_meas);
         const { isCandidate, metrics } = this.checkStationaryCandidate();
         if (isCandidate) {
@@ -516,11 +524,13 @@ export class TrajectoryService {
             this.movingTick += dt;
             this.stationaryTick = 0;
         }
-        // Hysteresis: enter stationary after 300 ms; exit after 100 ms
-        if (!this.isStatState && this.stationaryTick > 0.3) {
+        // Hysteresis: enter stationary after ~450 ms; exit after short movement
+        if (!this.isStatState && this.stationaryTick > 0.45) {
             this.isStatState = true;
+            console.log('[Hybrid] → STATIONARY');
         } else if (this.isStatState && this.movingTick > 0.1) {
             this.isStatState = false;
+            console.log('[Hybrid] STATIONARY → MOVING');
         }
         const isStat = this.isStatState;
 
@@ -541,9 +551,24 @@ export class TrajectoryService {
             this.madgwick.setQuaternion(this.q);
         }
 
+        // Lock/unlock yaw to reduce lateral drift when the spin stops
+        if (!this.yawLocked && w_mag < this.YAW_LOCK_LOW) {
+            const e = this.toEuler(this.q);
+            this.yawLockValue = e.z;
+            this.yawLocked = true;
+            console.log('[Hybrid] Yaw locked');
+        } else if (this.yawLocked && w_mag > this.YAW_LOCK_HIGH) {
+            this.yawLocked = false;
+            console.log('[Hybrid] Yaw unlocked');
+        }
+
         // Update orientation with Madgwick (for visualization only, not used for gravity compensation)
         this.madgwick.update(w_meas.x, w_meas.y, w_meas.z, a_meas.x, a_meas.y, a_meas.z, dt);
         this.q = { ...this.madgwick.q };
+        if (this.yawLocked) {
+            const e = this.toEuler(this.q);
+            this.q = this.fromEuler(e.x, e.y, this.yawLockValue);
+        }
 
         // Rotate measured acceleration to world frame before gravity removal
         const a_world = QuatMath.rotate(this.q, a_meas);
@@ -581,6 +606,11 @@ export class TrajectoryService {
         acc_net.x = clip(acc_net.x);
         acc_net.y = clip(acc_net.y);
         acc_net.z = clip(acc_net.z);
+        // Clamp para evitar overshoots por picos aislados
+        const clamp = (v: number, limit = 15) => Math.max(-limit, Math.min(limit, v));
+        acc_net.x = clamp(acc_net.x);
+        acc_net.y = clamp(acc_net.y);
+        acc_net.z = clamp(acc_net.z);
 
         // Integrate kinematics via Kalman
         if (!isStat) {
@@ -593,8 +623,8 @@ export class TrajectoryService {
             this.kZ.predict(acc_net.z, dt); this.kZ.updateZUPT(acc_net.z);
             // Zero velocity explicitly en reposo
             this.v = Vec3Math.zero();
-            // Baseline posición al estabilizar para limitar offset
-            this.baselineP = { ...this.p };
+            // Baseline lateral al estabilizar; mantener Z para conservar altura absoluta
+            this.baselineP = { x: this.p.x, y: this.p.y, z: this.baselineP.z };
         }
 
         // Update position and velocity from Kalman filters
@@ -641,7 +671,8 @@ export class TrajectoryService {
 
         // Re-baseline al salir de estacionario para eliminar offset acumulado
         if (this.lastIsStat && !isStat) {
-            this.baselineP = { ...this.p };
+            // Re-baseline lateral only when saliendo de reposo
+            this.baselineP = { x: this.p.x, y: this.p.y, z: this.baselineP.z };
         }
         this.lastIsStat = isStat;
 
@@ -708,7 +739,7 @@ export class TrajectoryService {
     }
 
     /** Actualiza máquina de estados de repetición para consolidar métricas al cerrar ciclo. */
-    private updateRepState(pt: TrajectoryPoint) {
+    private updateRepState(_: TrajectoryPoint) {
         const vz = this.v.z;
         const moving = Math.abs(vz) > 0.05;
 
@@ -745,9 +776,9 @@ export class TrajectoryService {
         const meanW = mean(this.gyroBuffer);
         const stdA = Math.sqrt(variance(this.accelBuffer, meanA));
         const stdW = Math.sqrt(variance(this.gyroBuffer, meanW));
-        // Thresholds tuned for typical handheld IMU noise. Adjust as needed.
-        const isAccelStable = Math.abs(meanA - this.GRAVITY) < 0.5 && stdA < 0.15;
-        const isGyroStable = meanW < 0.15 && stdW < 0.05;
+        // Thresholds afinados para detectar reposo m\u00e1s r\u00e1pido
+        const isAccelStable = Math.abs(meanA - this.GRAVITY) < 0.3 && stdA < 0.08;
+        const isGyroStable = meanW < 0.087 && stdW < 0.03; // 5 dps
         return {
             isCandidate: isAccelStable && isGyroStable,
             metrics: { meanA, stdA, meanW, stdW },
@@ -771,6 +802,19 @@ export class TrajectoryService {
         const cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
         const yaw = Math.atan2(siny_cosp, cosy_cosp);
         return { x: roll, y: pitch, z: yaw };
+    }
+
+    /** Build quaternion from roll/pitch/yaw (radians). */
+    private fromEuler(roll: number, pitch: number, yaw: number): Quaternion {
+        const cr = Math.cos(roll * 0.5), sr = Math.sin(roll * 0.5);
+        const cp = Math.cos(pitch * 0.5), sp = Math.sin(pitch * 0.5);
+        const cy = Math.cos(yaw * 0.5), sy = Math.sin(yaw * 0.5);
+        return QuatMath.normalize({
+            w: cr * cp * cy + sr * sp * sy,
+            x: sr * cp * cy - cr * sp * sy,
+            y: cr * sp * cy + sr * cp * sy,
+            z: cr * cp * sy - sr * sp * cy,
+        });
     }
 
     /** Returns the last emitted TrajectoryPoint or a zeroed point if
@@ -935,7 +979,6 @@ export class TrajectoryService {
 
         for (const sample of this.rawDataBuffer) {
             const vZ = sample.v_raw.z; // Velocidad vertical (Z-up en física)
-            const aZ = sample.acc_net.z; // Aceleración lineal neta (sin gravedad)
 
             // Fase concéntrica: la barra sube (vZ > 0)
             // Filtramos un umbral de ruido para vZ y verificamos aceleración
@@ -966,6 +1009,13 @@ export class TrajectoryService {
     /** Desviación lateral máxima (plano X-Y relativo). */
     public getMaxLateral(): number {
         return this.maxLateral;
+    }
+
+    /** Desviación lateral final (norma en plano X-Y del último punto). */
+    public getFinalLateral(): number {
+        if (this.path.length === 0) return 0;
+        const last = this.path[this.path.length - 1].relativePosition;
+        return Math.hypot(last.x, last.y);
     }
 }
 

@@ -3,7 +3,7 @@
  */
 
 import { Mat3 } from './Mat3';
-import { Vec3, Vec3Math } from './Vec3';
+import { Vec3 } from './Vec3';
 
 export interface Quaternion {
     w: number;
@@ -70,7 +70,6 @@ export const QuatMath = {
      * Approx: q_new = q_old + 0.5 * q_old * (0, omega) * dt
      */
     integrate: (q: Quaternion, omega: Vec3, dt: number): Quaternion => {
-        const halfDt = 0.5 * dt;
         const qDot = {
             w: 0.5 * (-q.x * omega.x - q.y * omega.y - q.z * omega.z),
             x: 0.5 * (q.w * omega.x + q.y * omega.z - q.z * omega.y),

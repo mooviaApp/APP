@@ -1,0 +1,77 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+
+\title{Iteraci\'on 2 --- Referencia magn\'etica/p\'endulo y fusi\'on yaw\\\small{Versi\'on v2}}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Resumen ejecutivo}
+\begin{itemize}[leftmargin=12pt]
+  \item Objetivo: fijar yaw y reducir deriva lateral/vertical usando un sensor auxiliar (magnet\'ometro 3D o micro-p\'endulo 1 eje).
+  \item Alcance: firmware (payload ampliado y calibraci\'on), protocolo BLE, fusi\'on en \texttt{sensor-core}, UI/web, plan de pruebas y riesgos.
+  \item Compatibilidad: modo IMU-only sigue activo; selecci\'on din\'amica de la referencia extra v\'alida.
+\end{itemize}
+
+\section{Arquitectura propuesta}
+\subsection{Hardware}
+\begin{itemize}[leftmargin=12pt]
+  \item \textbf{Opción A (recomendada)}: Magnet\'ometro 3D (p.ej. LIS3MDL/QMC5883), ODR \(\approx100\) Hz, rango \(\pm 8\,\text{gauss}\).
+  \item \textbf{Opción B}: Micro-p\'endulo/inclin\'ometro 1 eje, ODR \(\approx200\) Hz, salida \(\theta\) respecto a gravedad.
+  \item Montaje solidario al IMU; alinear ejes y caracterizar offset mec\'anico.
+\end{itemize}
+
+\subsection{Firmware}
+\begin{itemize}[leftmargin=12pt]
+  \item Calibraci\'on \emph{hard/soft iron} para magnet\'ometro (matriz \(3\times3\) + bias) almacenada en flash; coeficientes enviados en WHO\_AM\_I.
+  \item Empaquetado: añadir \((m_x,m_y,m_z)\) (6 bytes) o \(\theta\) (2 bytes) por muestra; actualizar \texttt{BYTES\_PER\_SAMPLE}, \texttt{PACKET\_SIZE\_BYTES}.
+  \item Flag de calidad en payload (bitfield): mag\_ok, pendulum\_ok, calib\_loaded.
+\end{itemize}
+
+\subsection{Protocolo BLE}
+\begin{itemize}[leftmargin=12pt]
+  \item Versionar el mensaje: campo \texttt{protoVersion}; compatibilidad hacia atr\'as (app usa layout v1 si no hay v2).
+  \item WHO\_AM\_I extendido: versi\'on FW, declinaci\'on magn\'etica, matriz de calibraci\'on (opcionalmente comprimida).
+  \item Documentar nuevos offsets dentro de los 15 samples por paquete.
+\end{itemize}
+
+\section{Fusi\'on en \texttt{sensor-core}}
+\begin{itemize}[leftmargin=12pt]
+  \item Madgwick/Mahony con magnet\'ometro: usar mag s\'olo si \(|B|\in[30,60]\,\mu\text{T}\) y varianza mag baja en ventana corta; aplicar declinaci\'on.
+  \item Fallback IMU-only cuando la calidad mag cae (interferencias de discos/metal).
+  \item Lock yaw cuando mag es confiable; mantener yaw relativo si mag se invalida.
+  \item P\'endulo: usar \(\theta\) como observaci\'on directa de roll/pitch en giro r\'apido; combinar con gyro en filtro complementario.
+  \item Exportar flags en rawData (magUsed, pendulumUsed, magQuality).
+\end{itemize}
+
+\section{App y Web-test}
+\begin{itemize}[leftmargin=12pt]
+  \item Decoder v2: parsear campos extras; fallback v1.
+  \item UI indicadores: “Mag OK / Mag bloqueado / Pendulum OK”; mostrar yaw absoluto cuando disponible.
+  \item M\'etricas nuevas: altura/lateral con referencia, yaw confiable, calidad mag/p\'endulo en export JSON.
+\end{itemize}
+
+\section{Plan de pruebas}
+\begin{itemize}[leftmargin=12pt]
+  \item Banco est\'atico: orientar sensor a N/E/S; error yaw \(\le 5^\circ\); deriva lateral \(<2\) cm en 10 s.
+  \item Giro de manga con sensor fijo: z/lateral \(<3\) cm con mag/p\'endulo activo; comparar contra modo IMU-only.
+  \item Entorno met\'alico (discos): mag debe deshabilitarse autom\'atico; trayectoria estable en IMU-only.
+  \item Compatibilidad: firmware v1 sin mag sigue funcionando (parsing v1).
+\end{itemize}
+
+\section{Roadmap y riesgos}
+\begin{itemize}[leftmargin=12pt]
+  \item \textbf{Dependencias}: disponibilidad de sensor mag/p\'endulo, espacio en PCB, ancho de paquete BLE.
+  \item \textbf{Interferencias}: proximidad a hierro/discos; mitigar con quality gates y fallback.
+  \item \textbf{Calibraci\'on}: requerir rutina de campo (8‑shape) para mag; persistencia en flash.
+  \item \textbf{Tiempo}: estimar 2–3 sprints para HW+FW+app+web con pruebas de campo.
+\end{itemize}
+
+\end{document}

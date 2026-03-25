@@ -1,111 +1,84 @@
-# MOOVIA - Velocity Based Training App
+# MOOVIA — Sensor Lab
 
-Bienvenido al repositorio del proyecto **MOOVIA**. 
-Esta aplicación está diseñada para el entrenamiento basado en velocidad (VBT), permitiendo a los usuarios medir, registrar y analizar su rendimiento en tiempo real utilizando sensores inerciales.
+Stack para captura y análisis de levantamientos con IMU en barra. Incluye:
+- **App móvil (Expo/React Native)** para conectar por BLE, mostrar métricas en vivo y exportar sesiones en JSON.
+- **Web-test (Vite/TS/Chart.js)** para reprocesar los JSON exportados y visualizar trayectorias/métricas offline.
+- **sensor-core** (TypeScript) con la fusión de sensores, filtros y métrica de levantamiento.
 
-## 🛠 Tech Stack (Tecnologías)
-
-Este proyecto utiliza tecnologías modernas para garantizar rendimiento y escalabilidad:
-
-- **TypeScript**: El lenguaje principal. Es como JavaScript pero "con superpoderes" (tipado estático), lo que nos ayuda a prevenir errores antes de ejecutar el código y hace que el mantenimiento sea mucho más fácil.
-- **React Native**: Nuestro framework para crear la aplicación móvil. Nos permite escribir el código una vez en TypeScript/JavaScript y "traducirlo" automágicamente a una aplicación nativa real para Android (y iOS en el futuro).
-- **Expo**: Herramienta que facilita el desarrollo, compilación y despliegue de aplicaciones React Native.
-- **Estructura Modular**: Aunque el proyecto se centra únicamente en la App Móvil, conservamos una organización limpia donde la lógica de negocio y los componentes visuales están separados en paquetes (`packages/`) reutilizables, manteniendo el código ordenado y fácil de mantener.
-
-## 📂 Estructura del Proyecto
-
-El proyecto sigue una arquitectura modular:
-
-```text
-c:\MOOVIA_APP\APP\
-├── apps\
-│   └── mobile\       # La aplicación React Native (Android) principal.
-├── packages\
-│   ├── domain\       # Lógica de negocio pura, compartida y sin dependencias de UI.
-│   └── ui\           # Componentes visuales reutilizables (Botones, Tarjetas, etc.).
-└── README.md         # Este archivo.
+## Estructura
+```
+C:\MOOVIA_APP\APP
+├─ apps/
+│  ├─ mobile/        # App React Native + Expo Dev Client
+│  └─ web-test/      # Visualizador offline de sesiones (Vite)
+├─ packages/
+│  └─ sensor-core/   # Fusión IMU, filtros Kalman, métricas
+├─ docs/             # Informes técnicos (p.ej. iteration2-vision.pdf)
+└─ package.json
 ```
 
-## 🚀 Requisitos Previos
+## Requisitos
+- Node.js 18+
+- JDK 17+
+- Android SDK / adb / Gradle (para APK)
+- Expo CLI (`npm i -g expo-cli`) recomendado para dev
+- TeX Live (solo si vas a compilar PDFs en `docs/`)
 
-Antes de empezar, asegúrate de tener instalado:
+## Instalación de dependencias
+```bash
+cd C:\MOOVIA_APP\APP
+npm install
+```
 
-1.  **Node.js**: Entorno de ejecución para JavaScript (versión 18+ recomendada).
-2.  **Java JDK 17+**: Necesario para compilar la aplicación Android.
-3.  **Android SDK / Android Studio**: Para las herramientas de compilación de Android (`adb`, `gradle`).
+## App móvil (Expo Dev Client)
+### Desarrollo en dispositivo
+```bash
+cd apps\mobile
+npx expo start --dev-client
+```
+- Escanea el QR con Expo Go/Dev Client o pulsa `a` para emulador Android.
 
-## 💻 Configuración e Instalación
-
-1.  **Instalar dependencias**:
-    Ejecuta el siguiente comando en la raíz del proyecto para descargar todas las librerías necesarias:
-    ```bash
-    npm install
-    ```
-
-## 📱 Ejecutar en Desarrollo
-
-Para iniciar el servidor de desarrollo y trabajar en la app en tiempo real:
-
-1.  Ve a la carpeta de la aplicación móvil:
-    ```bash
-    cd apps/mobile
-    ```
-2.  Inicia el servidor de Expo:
-    ```bash
-    npx expo start
-    ```
-3.  Escanea el código QR con la app **Expo Go** en tu móvil o presiona `a` para abrir en un emulador Android.
-
----
-
-## 🏗 Generar APK (Android)
-
-Este repositorio está configurado para generar un APK de Android de forma local ("Bare Workflow").
-
-### Comandos de Compilación
-
-Para generar el archivo `app-debug.apk`:
-
-#### Windows (Powershell)
+### Generar APK debug
 ```powershell
 cd apps\mobile\android
 .\gradlew assembleDebug
 ```
+APK: `apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk`
 
-#### Linux / Mac
+### Exportar sesión JSON (desde la app)
+Botón “Export Session JSON” en la pantalla principal. Guarda en caché del dispositivo y abre diálogo de compartir si `expo-sharing` está disponible.
+
+## Web-test (visualizador offline)
+Permite cargar un JSON exportado y ver:
+- Aceleración lineal, velocidad, desplazamiento vertical.
+- Trayectoria 2D (X vs Z), métricas (VMP, Acel. pico, Altura máx., Lateral máx./final).
+
+### Correr en local
 ```bash
-cd apps/mobile/android
-./gradlew assembleDebug
+cd apps\web-test
+npm install      # primera vez
+npm run dev -- --host
 ```
+Abrir http://localhost:5173 y usar “Load JSON”.
 
-### Ubicación del APK
-Al finalizar, el instalable estará en:
-`apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk`
-
----
-
-## 📲 Instalación en Dispositivo Físico
-
-Una vez generado el APK, tienes dos formas de instalarlo en tu móvil Android:
-
-### Opción 1: Transferencia USB (Sencilla)
-1.  Conecta tu móvil al PC por USB.
-2.  Selecciona modo **"Transferencia de archivos" (MTP)** en el móvil.
-3.  Copia el archivo `app-debug.apk` a la carpeta `Downloads` (Descargas) de tu móvil.
-4.  En el móvil, abre el "Gestor de Archivos", busca el APK y pulsa para instalar.
-
-### Opción 2: ADB (Rápida para desarrolladores)
-Si tienes activada la **Depuración USB** en las opciones de desarrollador de tu Android:
-
-```powershell
-adb install -r apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+### Build estático
+```bash
+cd apps\web-test
+npm run build
 ```
+Salida en `apps/web-test/dist`.
 
----
+## sensor-core (fusión IMU)
+- Ubicado en `packages/sensor-core`.
+- Implementa: Madgwick + compensación de giro de manga, filtros Kalman 1D, ZUPT, métricas (altura, VMP, pico de aceleración, desviación lateral), post-procesado y export.
 
-## ℹ️ Notas Adicionales sobre la Limpieza del Repositorio
+## Documentos
+- `docs/iteration2/iteration2-vision.pdf`: visión técnica de la iteración 2 (referencia magnética/péndulo y mejoras de yaw).
 
-Para optimizar este entorno específicamente para Android:
-- Se han eliminado carpetas no esenciales (`apps/web`, `apps/backend`).
-- Se han limpiado scripts de `package.json` relacionados con iOS/Web.
-- Se ha asegurado que `apps/mobile/android` esté trackeado por git para consistencia en la compilación.
+## Comandos rápidos
+- Limpiar y reconstruir APK: `cd apps/mobile/android && ./gradlew assembleDebug --rerun-tasks`
+- Reprocesar una sesión en web-test: abrir dev server y cargar JSON exportado.
+
+## Notas
+- Compatibilidad: el protocolo BLE actual usa paquetes de 15 muestras; si se amplían campos (mag/péndulo) se versionará el decoder.
+- Si el share de Android falla, la app muestra la ruta local en caché para recuperar el archivo.
