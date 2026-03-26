@@ -21,7 +21,6 @@ import { Device } from 'react-native-ble-plx';
 import { useBLE } from '../hooks/useBLE';
 import { SensorDataCard } from '../components/SensorDataCard';
 import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
-import { SENSOR_CONFIG } from '../services/ble/constants';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
@@ -63,6 +62,7 @@ export function BLEDeviceScreen() {
         resetIMU,
         clearError,
         calibrateSensor, // REMOVED - now automatic in Stream On
+        getRawSession,
     } = useBLE();
 
     const handleStartStreaming = async () => {
@@ -133,22 +133,13 @@ export function BLEDeviceScreen() {
 
     const handleExportSession = async () => {
         try {
-            const rawData = trajectoryService.getRawData();
-            const trajectory = finalPath.length > 0 ? finalPath : trajectoryService.getPath();
-            if (rawData.length === 0 && trajectory.length === 0) {
+            const exportData = getRawSession();
+            if (exportData.samples.length === 0 && exportData.rawPackets.length === 0) {
                 Alert.alert('Sin datos', 'No hay muestras registradas aÃºn.');
                 return;
             }
 
-            const payload = {
-                version: '1.0.0',
-                exportedAt: new Date().toISOString(),
-                sensorConfig: SENSOR_CONFIG,
-                trajectory,
-                rawData,
-            };
-
-            const json = JSON.stringify(payload, null, 2);
+            const json = JSON.stringify(exportData, null, 2);
             const filename = `moovia-session-${Date.now()}.json`;
             const fileUri = FileSystem.cacheDirectory + filename;
 

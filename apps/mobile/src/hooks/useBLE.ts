@@ -9,7 +9,7 @@ import { PermissionsAndroid, Platform, Alert } from 'react-native';
 import { Device } from 'react-native-ble-plx';
 // type Device = any; // Mock type for Device since library is removed
 import { getBLEService, BLEEvent } from '../services/ble/BLEService';
-import { IMUSample, LogMessage, WHOAMIResponse, SENSOR_CONFIG } from '../services/ble/constants';
+import { IMUSample, LogMessage, WHOAMIResponse, SENSOR_CONFIG, RawSessionExport } from '../services/ble/constants';
 import { trajectoryService } from '../services/math/TrajectoryService';
 
 // ============================================================================
@@ -38,6 +38,7 @@ export interface UseBLEResult {
     resetIMU: () => Promise<void>;
     calibrateSensor: () => Promise<void>;
     clearError: () => void;
+    getRawSession: () => RawSessionExport;
 }
 
 // ============================================================================
@@ -364,6 +365,10 @@ export function useBLE(): UseBLEResult {
         setError(null);
     }, []);
 
+    const getRawSession = useCallback(() => {
+        return bleService.getRawSessionExport();
+    }, [bleService]);
+
     // ==========================================================================
     // Return
     // ==========================================================================
@@ -390,5 +395,6 @@ export function useBLE(): UseBLEResult {
         resetIMU,
         calibrateSensor,
         clearError,
+        getRawSession,
     };
 }

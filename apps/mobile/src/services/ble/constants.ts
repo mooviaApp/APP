@@ -146,6 +146,8 @@ export interface IMUSample {
 
     /** Monotonic timestamp in milliseconds (Preferred) */
     timestampMs: number;
+    /** Hardware tick (uint16) from the packet, optional */
+    hwTs16?: number;
 }
 
 export interface LogMessage {
@@ -157,4 +159,26 @@ export interface WHOAMIResponse {
     timestamp: string;
     value: number;
     isValid: boolean;
+}
+
+export interface RawPacketRecord {
+    base64: string;
+    receivedAt: number;
+    length: number;
+    sampleCount: number;
+    index: number;
+}
+
+export interface RawSessionExport {
+    version: string;
+    exportedAt: string;
+    sensorConfig: typeof SENSOR_CONFIG;
+    rawPackets: RawPacketRecord[];
+    samples: IMUSample[];
+    metadata: {
+        totalSamples: number;
+        totalPackets: number;
+        durationMs: number;
+        avgSampleRateHz: number;
+    };
 }

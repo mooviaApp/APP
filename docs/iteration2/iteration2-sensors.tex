@@ -1,0 +1,86 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+
+\title{Debate IMU ICM-42688-P y selección de magnetómetro / inclinómetro \\ \small{Anexo Iteración 2}}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Contexto}
+La IMU TDK ICM-42688-P (6 DoF) generó debate en foros 2022-2024. Las quejas (ruido y espigas en gyro) se atribuyeron al sensor, pero se demostró que la causa real eran PCBs con alimentación ruidosa y filtrado insuficiente. Con un diseño limpio (LDO dedicado, plano de masa, RC/LC) la IMU ofrece ruido muy bajo (gyro $\approx 2.8$ mdps/$\sqrt{\text{Hz}}$, accel $\approx 70\,\mu$g/$\sqrt{\text{Hz}}$) y fue adoptada como estándar en controladoras de drones 2023-2025.
+
+\section{IMUs comparadas}
+\begin{longtable}{|>{\raggedright}p{3cm}|>{\raggedright}p{3cm}|>{\raggedright}p{3cm}|>{\raggedright\arraybackslash}p{4cm}|}
+\hline
+\textbf{IMU} & \textbf{Ruido gyro} & \textbf{Ruido accel} & \textbf{Comentarios} \\
+\hline
+ICM-42688-P & $\approx 2.8$ mdps/$\sqrt{\text{Hz}}$ & $\approx 70\,\mu$g/$\sqrt{\text{Hz}}$ & ODR hasta 32 kHz; exige alimentación limpia y buen layout. \\
+\hline
+BMI270 & $<7$ mdps/$\sqrt{\text{Hz}}$ & $\sim 0.4$--$0.5$ mg (12.5–25 Hz) & Más barata; ruido mayor; usada por disponibilidad. \\
+\hline
+LSM6DSR & $\approx 5$ mdps/$\sqrt{\text{Hz}}$ & $\sim 60\,\mu$g/$\sqrt{\text{Hz}}$ & Ruido intermedio; buena estabilidad térmica; coste contenido. \\
+\hline
+MPU6000 & $\sim 8$ mdps/$\sqrt{\text{Hz}}$ & $\sim 400\,\mu$g/$\sqrt{\text{Hz}}$ & Robusta pero obsoleta; difícil de conseguir. \\
+\hline
+BMI088 & $\sim 3$ mdps/$\sqrt{\text{Hz}}$ & $\sim 120\,\mu$g/$\sqrt{\text{Hz}}$ & A veces usada como IMU secundaria para redundancia. \\
+\hline
+\end{longtable}
+
+\textbf{Conclusión IMU:} elegir ICM-42688-P cuando se garantice LDO dedicado y filtrado; alternativa de coste: LSM6DSR; BMI270 sólo por precio/disponibilidad.
+
+\section{Magnetómetros}
+\begin{longtable}{|>{\raggedright}p{3cm}|>{\raggedright}p{4cm}|>{\raggedright\arraybackslash}p{6cm}|}
+\hline
+\textbf{Sensor} & \textbf{Características} & \textbf{Notas} \\
+\hline
+MMC5983MA (Memsic) & $\pm 8$ G, 18 bits, ruido $\sim 0.04\,\mu$T, error rumbo $<0.02^\circ$ & Mejor precisión de bajo coste; SPI; rango amplio. \\
+\hline
+IST8310 (iSentek) & Buena estabilidad térmica, promediado interno & Usado en PX4; balance precio/precisión; I$^2$C. \\
+\hline
+LIS3MDL (ST) & $\pm 4/8/12/16$ G, ruido mayor & Apto para prototipos; no para rumbo preciso. \\
+\hline
+BMM150/BMM350 & Rangos limitados u obsoletos & Descartados en diseños nuevos. \\
+\hline
+\end{longtable}
+
+\textbf{Conclusión magnetómetro:} MMC5983MA recomendado para rumbo de alta precisión; IST8310 como opción equilibrada; LIS3MDL sólo para prototipos.
+
+\section{Inclinómetros / péndulo en chip}
+\begin{longtable}{|>{\raggedright}p{3cm}|>{\raggedright}p{3.5cm}|>{\raggedright}p{3cm}|>{\raggedright\arraybackslash}p{3.5cm}|}
+\hline
+\textbf{Sensor} & \textbf{Ruido / resolución} & \textbf{Consumo} & \textbf{Aplicación} \\
+\hline
+Murata SCL3300-D01 & $0.001^\circ/\sqrt{\text{Hz}}$, res. $0.0055^\circ$/LSB & $\sim 1.2$ mA @3.3V & Máxima precisión estática, nivelación/estructuras. \\
+\hline
+ST IIS2ICLX & $15\,\mu$g/$\sqrt{\text{Hz}}$ ($\sim 0.00086\,g$), ML core & 0.42 mA típico & Bajo consumo + buena precisión; IoT/robótica. \\
+\hline
+Analog ADIS16209 & Precisión $0.1^\circ$, res. $0.025^\circ$ & Intermedio & Plataforma estabilizada, autocalibración. \\
+\hline
+Murata SCA830-D07 & Monoeje, BW 6.25 Hz & 3.3 V, estable & Automoción, inclinación lenta. \\
+\hline
+\end{longtable}
+
+\textbf{Conclusión inclinómetros:} SCL3300-D01 para precisión extrema; IIS2ICLX equilibrio precisión/consumo; ADIS16209 para solución robusta con autocalibración; SCA830 para un eje en automoción.
+
+\section{Recomendaciones finales}
+\begin{itemize}[leftmargin=12pt]
+  \item \textbf{IMU}: ICM-42688-P + buen dise\~no de energ\'ia y layout; alternativa LSM6DSR si coste manda.
+  \item \textbf{Mag}: MMC5983MA (precisi\'on), IST8310 (balance); LIS3MDL/QMC5883L s\'olo prototipos.
+  \item \textbf{Inclin\'ometro}: SCL3300-D01 para est\'atico de alta exactitud; IIS2ICLX si importa consumo.
+  \item \textbf{Dise\~no PCB}: LDO dedicado, planos de masa continuos, filtros RC/LC en Vdd y referencias; opci\'on de oscilador externo para reducir drift gyro.
+  \item \textbf{Fusi\'on}: Kalman/complementario; quality gates para mag ($|B|$, varianza, dB/dt) y para inclin\'ometro; fallback IMU-only.
+  \item \textbf{Calibraci\'on}: f\'abrica (bias gyro/acc/mag) y campo (8-shape para mag); almacenar coeficientes y versionar WHO\_AM\_I.
+\end{itemize}
+
+\end{document}

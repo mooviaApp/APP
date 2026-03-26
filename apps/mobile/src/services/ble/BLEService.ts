@@ -16,6 +16,8 @@ import {
     IMUSample,
     LogMessage,
     WHOAMIResponse,
+    RawPacketRecord,
+    RawSessionExport,
 } from './constants';
 import {
     decodeNotification,
@@ -60,6 +62,11 @@ export class BLEService {
     private readonly MAX_BUFFER_SAMPLES = SENSOR_CONFIG.BATCH_SIZE_SAMPLES * 10;
     // Buffer is solo para el warmup inicial; después se desactiva para evitar crecimiento
     private bufferingEnabled = false;
+    // Raw capture buffers (for export only, no processing)
+    private rawPackets: RawPacketRecord[] = [];
+    private rawSamples: IMUSample[] = [];
+    private sessionStartMs: number | null = null;
+    private packetIndex: number = 0;
 
     constructor() {
         this.manager = new BleManager();
@@ -390,6 +397,7 @@ export class BLEService {
     private handleDataNotification(base64Data: string): void {
         try {
             const rawBytes = decodeBase64ToBytes(base64Data);
+            const receivedAt = Date.now();
 
             // EXPLICIT LOGGING FOR FIRMWARE VERIFICATION (commented out for production)
             // const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -404,6 +412,15 @@ export class BLEService {
             if (decoded && Array.isArray(decoded)) {
                 // It's an array of IMU samples (15 samples per packet)
                 const samples = decoded as IMUSample[];
+                // Capture raw packet + decoded samples for export (no processing)
+                this.rawPackets.push({
+                    base64: base64Data,
+                    receivedAt,
+                    length: rawBytes.length,
+                    sampleCount: samples.length,
+                    index: this.packetIndex++,
+                });
+                this.rawSamples.push(...samples);
 
                 // Process samples for trajectory (All samples needed for integration)
                 samples.forEach(sample => {
@@ -433,6 +450,15 @@ export class BLEService {
                         data: { sample: samples[samples.length - 1] },
                     });
                 }
+            } else {
+                // Still log raw packet so export remains contiguous
+                this.rawPackets.push({
+                    base64: base64Data,
+                    receivedAt,
+                    length: rawBytes.length,
+                    sampleCount: 0,
+                    index: this.packetIndex++,
+                });
             }
         } catch (error) {
             console.error('Error handling data notification:', error);
@@ -509,6 +535,11 @@ export class BLEService {
     async startStreaming(): Promise<void> {
         this.bufferingEnabled = true; // enable warm-up buffering
         this.sampleBuffer = []; // Clear buffer
+        // Reset raw capture buffers
+        this.rawPackets = [];
+        this.rawSamples = [];
+        this.sessionStartMs = Date.now();
+        this.packetIndex = 0;
         // Reset timestamp continuity for a fresh streaming session
         resetIMUTimestampContinuity();
         // Clear any previous trajectory data
@@ -548,6 +579,37 @@ export class BLEService {
     stopBuffering() {
         this.bufferingEnabled = false;
         this.sampleBuffer = [];
+    }
+
+    /**
+     * Build a raw-only session export (no processed trajectory).
+     */
+    getRawSessionExport(): RawSessionExport {
+        const totalSamples = this.rawSamples.length;
+        const totalPackets = this.rawPackets.length;
+        let durationMs = 0;
+
+        if (totalSamples > 1) {
+            durationMs = this.rawSamples[totalSamples - 1].timestampMs - this.rawSamples[0].timestampMs;
+        } else if (this.sessionStartMs) {
+            durationMs = Date.now() - this.sessionStartMs;
+        }
+
+        const avgSampleRateHz = durationMs > 0 ? totalSamples / (durationMs / 1000) : 0;
+
+        return {
+            version: 'raw-1.0.0',
+            exportedAt: new Date().toISOString(),
+            sensorConfig: SENSOR_CONFIG,
+            rawPackets: [...this.rawPackets],
+            samples: [...this.rawSamples],
+            metadata: {
+                totalSamples,
+                totalPackets,
+                durationMs,
+                avgSampleRateHz,
+            },
+        };
     }
 
     /**

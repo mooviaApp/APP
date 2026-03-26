@@ -54,6 +54,8 @@ export interface IMUSample {
     timestamp?: string;
     /** Monotonic timestamp in milliseconds (Preferred) */
     timestampMs: number;
+    /** Hardware 16-bit timestamp from packet (ticks), optional */
+    hwTs16?: number;
 }
 
 export interface RawIMUPacket {
@@ -71,6 +73,34 @@ export interface TrajectoryRecord {
     q: { w: number; x: number; y: number; z: number };
     p_raw: { x: number; y: number; z: number };
     v_raw: { x: number; y: number; z: number };
+}
+
+export interface RawPacketRecord {
+    /** Base64 payload exactly as received from BLE notification */
+    base64: string;
+    /** Wall-clock timestamp (ms) when the packet was received */
+    receivedAt: number;
+    /** Packet length in bytes */
+    length: number;
+    /** Number of IMU samples decoded from this packet */
+    sampleCount: number;
+    /** Monotonic index of the packet within the session (starting at 0) */
+    index: number;
+}
+
+/** Raw-only export (no processed trajectory) */
+export interface RawSessionExport {
+    version: string;
+    exportedAt: string;
+    sensorConfig: typeof SENSOR_CONFIG;
+    rawPackets: RawPacketRecord[];
+    samples: IMUSample[];
+    metadata: {
+        totalSamples: number;
+        totalPackets: number;
+        durationMs: number;
+        avgSampleRateHz: number;
+    };
 }
 
 /** Full session data export format (JSON) */

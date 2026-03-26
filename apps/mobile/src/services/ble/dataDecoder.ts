@@ -209,6 +209,7 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
         gx: lastRaw.gx,
         gy: lastRaw.gy,
         gz: lastRaw.gz,
+        hwTs16: lastRaw.hwTs,
     };
 
     // Back‑calculate timestamps for preceding samples within the packet
@@ -230,6 +231,7 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
             gx: curr.gx,
             gy: curr.gy,
             gz: curr.gz,
+            hwTs16: curr.hwTs,
         };
     }
 
