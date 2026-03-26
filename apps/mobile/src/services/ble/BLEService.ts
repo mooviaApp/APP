@@ -431,15 +431,11 @@ export class BLEService {
                 if (this.bufferingEnabled) {
                     this.sampleBuffer.push(...samples);
 
-                    // Check if buffer is full (ready to send to backend)
-                    if (this.sampleBuffer.length >= SENSOR_CONFIG.BATCH_SIZE_SAMPLES) {
-                        // Note: Backend transmission will be handled by the hook/component
-                        // We just keep the buffer here
-                    }
-
-                    // Prevent unbounded growth when not flushed by a backend
+                    // Prevent unbounded growth if warmup is not stopped by caller
                     if (this.sampleBuffer.length > this.MAX_BUFFER_SAMPLES) {
-                        this.sampleBuffer.splice(0, this.sampleBuffer.length - this.MAX_BUFFER_SAMPLES);
+                        console.warn('[BLE] sampleBuffer overflow; stopping buffering to avoid growth.');
+                        this.bufferingEnabled = false;
+                        this.sampleBuffer = [];
                     }
                 }
 
@@ -610,6 +606,76 @@ export class BLEService {
                 avgSampleRateHz,
             },
         };
+    }
+
+    /**
+     * Capture quality stats for UI/debug.
+     */
+    getCaptureStats() {
+        const samples = this.rawSamples;
+        const packets = this.rawPackets;
+        if (!samples || samples.length < 2) {
+            return {
+                avgRateHz: 0,
+                medianDtMs: 0,
+                maxDtMs: 0,
+                gapsPct: 0,
+                maxGapMs: 0,
+                totalPackets: packets?.length || 0,
+                invalidPackets: 0,
+                estimatedMissingSamples: 0,
+                droppedPackets: 0,
+            };
+        }
+
+        const sorted = [...samples].sort((a, b) => a.timestampMs - b.timestampMs);
+        const dts: number[] = [];
+        for (let i = 0; i < sorted.length - 1; i++) {
+            dts.push(sorted[i + 1].timestampMs - sorted[i].timestampMs);
+        }
+        const durationMs = sorted[sorted.length - 1].timestampMs - sorted[0].timestampMs;
+        const avgRateHz = durationMs > 0 ? sorted.length / (durationMs / 1000) : 0;
+        const medianDtMs = this.median(dts);
+        const maxDtMs = Math.max(...dts);
+        const GAP_THRESHOLD_MS = 4;
+        const gapsPct = dts.length > 0 ? (dts.filter(dt => dt > GAP_THRESHOLD_MS).length / dts.length) * 100 : 0;
+
+        let maxGapMs = 0;
+        let invalidPackets = 0;
+        let droppedPackets = 0;
+        if (packets && packets.length > 0) {
+            let prev = packets[0];
+            packets.forEach((p: any, idx: number) => {
+                if (p.length && p.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) invalidPackets++;
+                if (p.sampleCount === 0) droppedPackets++;
+                if (idx > 0) {
+                    const g = p.receivedAt - prev.receivedAt;
+                    if (g > maxGapMs) maxGapMs = g;
+                    prev = p;
+                }
+            });
+        }
+        const expectedSamples = durationMs > 0 ? Math.round((durationMs / 1000) * SENSOR_CONFIG.ODR_HZ) : 0;
+        const estimatedMissingSamples = Math.max(0, expectedSamples - sorted.length);
+
+        return {
+            avgRateHz,
+            medianDtMs,
+            maxDtMs,
+            gapsPct,
+            maxGapMs: Math.max(maxGapMs, maxDtMs),
+            totalPackets: packets?.length || 0,
+            invalidPackets,
+            estimatedMissingSamples,
+            droppedPackets,
+        };
+    }
+
+    private median(arr: number[]): number {
+        if (!arr || arr.length === 0) return 0;
+        const sorted = [...arr].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
     }
 
     /**

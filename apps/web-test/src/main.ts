@@ -10,8 +10,22 @@ Chart.register(...registerables);
 
 // UI State
 let samples: IMUSample[] = [];
+let rawPackets: any[] = [];
 let charts: { [key: string]: Chart } = {};
 const trajectoryService = new TrajectoryService();
+const GAP_THRESHOLD_MS = 4;
+
+interface CaptureStats {
+    avgRateHz: number;
+    medianDtMs: number;
+    maxDtMs: number;
+    gapsPct: number;
+    maxGapMs: number;
+    totalPackets: number;
+    invalidPackets: number;
+    estimatedMissingSamples: number;
+    droppedPackets: number;
+}
 
 // DOM Elements
 const fileInput = document.getElementById('file-upload') as HTMLInputElement;
@@ -22,6 +36,19 @@ const lateralMaxEl = document.getElementById('lateral-max') as HTMLElement;
 const lateralFinalEl = document.getElementById('lateral-final') as HTMLElement;
 const sessionMetaEl = document.getElementById('session-meta') as HTMLElement;
 const rawTableBody = document.querySelector('#raw-table tbody') as HTMLElement;
+const packetTableBody = document.querySelector('#packet-table tbody') as HTMLElement;
+const captureStatusEl = document.getElementById('capture-status') as HTMLElement;
+const captureMetricsEl = {
+    avgRate: document.getElementById('cap-avgRate') as HTMLElement,
+    medianDt: document.getElementById('cap-medianDt') as HTMLElement,
+    maxDt: document.getElementById('cap-maxDt') as HTMLElement,
+    gapsPct: document.getElementById('cap-gapsPct') as HTMLElement,
+    maxGap: document.getElementById('cap-maxGap') as HTMLElement,
+    packets: document.getElementById('cap-packets') as HTMLElement,
+    invalid: document.getElementById('cap-invalid') as HTMLElement,
+    missing: document.getElementById('cap-missing') as HTMLElement,
+    dropped: document.getElementById('cap-dropped') as HTMLElement,
+};
 const tabBtns = document.querySelectorAll('.tab-btn');
 const tabPanes = document.querySelectorAll('.tab-pane');
 
@@ -56,10 +83,12 @@ function setupFileUpload() {
                 const data = JSON.parse(text);
                 
                 // Handle different JSON formats (array of samples or full export)
+                rawPackets = [];
                 if (Array.isArray(data)) {
                     samples = data;
                 } else if (data.samples) {
                     samples = data.samples;
+                    if (data.rawPackets) rawPackets = data.rawPackets;
                 } else if (data.rawData) {
                     // If it's the rawTrajectory record format
                     processRawTrajectory(data.rawData);
@@ -126,6 +155,9 @@ function updateChartsFromRaw(rawData: any[]) {
 function processData() {
     if (samples.length === 0) return;
 
+    // Sort by timestamp to avoid out-of-order issues
+    samples = [...samples].sort((a, b) => a.timestampMs - b.timestampMs);
+
     trajectoryService.reset();
     
     // Process all samples through the service
@@ -139,8 +171,10 @@ function processData() {
     // Update UI
     updateMetrics();
     updateTable();
+    updatePacketTable();
     updateCharts();
     updateMeta();
+    updateCaptureHealth();
 }
 
 function updateMetrics() {
@@ -174,17 +208,48 @@ function updateMeta() {
 function updateTable() {
     // Show first 50 samples to avoid lag
     const displaySamples = samples.slice(0, 50);
-    rawTableBody.innerHTML = displaySamples.map(s => `
+    rawTableBody.innerHTML = displaySamples.map((s, idx) => {
+        const prev = idx === 0 ? displaySamples[0] : displaySamples[idx - 1];
+        const dt = idx === 0 ? 0 : (s.timestampMs - prev.timestampMs);
+        return `
         <tr>
             <td>${s.timestampMs.toFixed(0)}</td>
+            <td>${dt.toFixed(3)}</td>
             <td>${s.ax.toFixed(3)}</td>
             <td>${s.ay.toFixed(3)}</td>
             <td>${s.az.toFixed(3)}</td>
             <td>${s.gx.toFixed(1)}</td>
             <td>${s.gy.toFixed(1)}</td>
             <td>${s.gz.toFixed(1)}</td>
-        </tr>
-    `).join('') + (samples.length > 50 ? `<tr><td colspan="7" style="text-align:center">... ${samples.length - 50} more samples ...</td></tr>` : '');
+            <td>${s.hwTs16 ?? '--'}</td>
+        </tr>`;
+    }).join('') + (samples.length > 50 ? `<tr><td colspan="9" style="text-align:center">... ${samples.length - 50} more samples ...</td></tr>` : '');
+}
+
+function updatePacketTable() {
+    if (!rawPackets || rawPackets.length === 0) {
+        packetTableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color: var(--text-muted);">No packets loaded</td></tr>`;
+        return;
+    }
+
+    const rows = [];
+    let prev: any = null;
+    const displayPackets = rawPackets.slice(0, 50);
+    displayPackets.forEach((p: any) => {
+        const gap = prev ? (p.receivedAt - prev.receivedAt) : 0;
+        rows.push(`<tr>
+            <td>${p.index}</td>
+            <td>${p.receivedAt}</td>
+            <td>${gap.toFixed(1)}</td>
+            <td>${p.length}</td>
+            <td>${p.sampleCount}</td>
+        </tr>`);
+        prev = p;
+    });
+    if (rawPackets.length > 50) {
+        rows.push(`<tr><td colspan="5" style="text-align:center; padding:12px; color: var(--text-muted);">... ${rawPackets.length - 50} more packets ...</td></tr>`);
+    }
+    packetTableBody.innerHTML = rows.join('');
 }
 
 function setupCharts() {
@@ -266,6 +331,86 @@ function updateCharts() {
 
     charts.path2d.data.datasets[0].data = path.map(p => ({ x: p.relativePosition.x, y: p.relativePosition.z }));
     charts.path2d.update();
+}
+
+function updateCaptureHealth() {
+    const stats = computeCaptureStats(samples, rawPackets, SENSOR_CONFIG.ODR_HZ);
+    const status = stats.gapsPct < 1 && stats.maxGapMs < 8 ? 'status-good'
+        : stats.gapsPct < 5 && stats.maxGapMs < 20 ? 'status-warn'
+        : 'status-bad';
+    captureStatusEl.className = `status-pill ${status}`;
+    captureStatusEl.innerText = status === 'status-good' ? 'Good' : status === 'status-warn' ? 'Warning' : 'Attention';
+
+    captureMetricsEl.avgRate.innerText = stats.avgRateHz.toFixed(0);
+    captureMetricsEl.medianDt.innerText = stats.medianDtMs.toFixed(3);
+    captureMetricsEl.maxDt.innerText = stats.maxDtMs.toFixed(3);
+    captureMetricsEl.gapsPct.innerText = stats.gapsPct.toFixed(2);
+    captureMetricsEl.maxGap.innerText = stats.maxGapMs.toFixed(2);
+    captureMetricsEl.packets.innerText = stats.totalPackets.toString();
+    captureMetricsEl.invalid.innerText = stats.invalidPackets.toString();
+    captureMetricsEl.missing.innerText = stats.estimatedMissingSamples.toFixed(0);
+    captureMetricsEl.dropped.innerText = stats.droppedPackets.toString();
+}
+
+function computeCaptureStats(s: IMUSample[], packets: any[], odrHz: number): CaptureStats {
+    if (!s || s.length < 2) {
+        return {
+            avgRateHz: 0, medianDtMs: 0, maxDtMs: 0, gapsPct: 0, maxGapMs: 0,
+            totalPackets: packets?.length || 0, invalidPackets: 0,
+            estimatedMissingSamples: 0, droppedPackets: 0
+        };
+    }
+
+    const sorted = [...s].sort((a, b) => a.timestampMs - b.timestampMs);
+    const dts = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+        dts.push(sorted[i + 1].timestampMs - sorted[i].timestampMs);
+    }
+    const durationMs = sorted[sorted.length - 1].timestampMs - sorted[0].timestampMs;
+    const avgRateHz = durationMs > 0 ? sorted.length / (durationMs / 1000) : 0;
+    const medianDtMs = median(dts);
+    const maxDtMs = Math.max(...dts);
+    const gaps = dts.filter(dt => dt > GAP_THRESHOLD_MS);
+    const gapsPct = dts.length > 0 ? (gaps.length / dts.length) * 100 : 0;
+    const thresholdPacketMs = GAP_THRESHOLD_MS * 5;
+    let maxGapMs = 0;
+    let droppedPackets = 0;
+    let invalidPackets = 0;
+    if (packets && packets.length > 0) {
+        let prev = packets[0];
+        maxGapMs = 0;
+        packets.forEach((p: any, idx: number) => {
+            if (p.length && p.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) invalidPackets++;
+            if (p.sampleCount === 0) droppedPackets++;
+            if (idx > 0) {
+                const gap = p.receivedAt - prev.receivedAt;
+                if (gap > maxGapMs) maxGapMs = gap;
+                prev = p;
+            }
+        });
+    }
+
+    const expectedSamples = durationMs > 0 ? Math.round((durationMs / 1000) * odrHz) : 0;
+    const estimatedMissingSamples = Math.max(0, expectedSamples - sorted.length);
+
+    return {
+        avgRateHz,
+        medianDtMs,
+        maxDtMs,
+        gapsPct,
+        maxGapMs: Math.max(maxGapMs, maxDtMs),
+        totalPackets: packets?.length || 0,
+        invalidPackets,
+        estimatedMissingSamples,
+        droppedPackets
+    };
+}
+
+function median(arr: number[]): number {
+    if (arr.length === 0) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
 init();

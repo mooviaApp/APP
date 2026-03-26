@@ -63,7 +63,9 @@ export function BLEDeviceScreen() {
         clearError,
         calibrateSensor, // REMOVED - now automatic in Stream On
         getRawSession,
+        getCaptureStats,
     } = useBLE();
+    const [captureStats, setCaptureStats] = useState<any | null>(null);
 
     const handleStartStreaming = async () => {
         setFinalPath([]); // Clear previous graph
@@ -86,11 +88,13 @@ export function BLEDeviceScreen() {
             const vmp = trajectoryService.getMeanPropulsiveVelocity();
             const height = trajectoryService.getMaxHeight();
             const lateral = trajectoryService.getMaxLateral();
+            const capStats = getCaptureStats();
 
             setPeakAcceleration(peakAcc);
             setMeanPropulsiveVelocity(vmp);
             setMaxHeight(height);
             setMaxLateral(lateral);
+            setCaptureStats(capStats);
 
             console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/sÂ², VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
 
@@ -349,6 +353,39 @@ export function BLEDeviceScreen() {
                                         <Text style={styles.metricUnit}>m/sÂ²</Text>
                                     </View>
                                 )}
+                            </View>
+                        )}
+
+                        {captureStats && (
+                            <View style={styles.captureCard}>
+                                <Text style={styles.sectionTitle}>Capture Health</Text>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>avgRate</Text><Text style={styles.captureValue}>{captureStats.avgRateHz.toFixed(0)} Hz</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>medianDt</Text><Text style={styles.captureValue}>{captureStats.medianDtMs.toFixed(3)} ms</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>maxDt</Text><Text style={styles.captureValue}>{captureStats.maxDtMs.toFixed(3)} ms</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>%gaps&gt;4ms</Text><Text style={styles.captureValue}>{captureStats.gapsPct.toFixed(2)}%</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>maxGap</Text><Text style={styles.captureValue}>{captureStats.maxGapMs.toFixed(2)} ms</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>packets</Text><Text style={styles.captureValue}>{captureStats.totalPackets}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>invalidLen</Text><Text style={styles.captureValue}>{captureStats.invalidPackets}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>missingSamples</Text><Text style={styles.captureValue}>{captureStats.estimatedMissingSamples.toFixed(0)}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>droppedPackets</Text><Text style={styles.captureValue}>{captureStats.droppedPackets}</Text>
+                                </View>
                             </View>
                         )}
 
@@ -651,6 +688,28 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: COLORS.text,
         marginTop: 2,
+    },
+    captureCard: {
+        backgroundColor: COLORS.card,
+        borderRadius: 16,
+        padding: 16,
+        marginTop: 12,
+        borderWidth: 1,
+        borderColor: '#333',
+    },
+    captureRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        marginBottom: 6,
+    },
+    captureLabel: {
+        color: COLORS.textMuted,
+        fontSize: 12,
+    },
+    captureValue: {
+        color: COLORS.text,
+        fontSize: 13,
+        fontWeight: '700',
     },
 });
 

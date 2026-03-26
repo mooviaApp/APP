@@ -39,6 +39,7 @@ export interface UseBLEResult {
     calibrateSensor: () => Promise<void>;
     clearError: () => void;
     getRawSession: () => RawSessionExport;
+    getCaptureStats: () => any;
 }
 
 // ============================================================================
@@ -369,6 +370,10 @@ export function useBLE(): UseBLEResult {
         return bleService.getRawSessionExport();
     }, [bleService]);
 
+    const getCaptureStats = useCallback(() => {
+        return bleService.getCaptureStats();
+    }, [bleService]);
+
     // ==========================================================================
     // Return
     // ==========================================================================
@@ -396,5 +401,6 @@ export function useBLE(): UseBLEResult {
         calibrateSensor,
         clearError,
         getRawSession,
+        getCaptureStats,
     };
 }

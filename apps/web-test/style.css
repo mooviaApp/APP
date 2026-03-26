@@ -280,3 +280,20 @@ td {
 
 .mt-20 { margin-top: 20px; }
 .scroll-hide::-webkit-scrollbar { display: none; }
+
+/* Capture health */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.status-unknown { background: rgba(255,255,255,0.08); color: var(--text-muted); }
+.status-good { background: rgba(29, 240, 159, 0.2); color: var(--secondary); }
+.status-warn { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+.status-bad  { background: rgba(240, 65, 29, 0.2); color: var(--accent); }
+
+.capture-grid p { margin-bottom: 6px; font-size: 13px; }

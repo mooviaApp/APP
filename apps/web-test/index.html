@@ -68,6 +68,22 @@
             </div>
           </div>
 
+          <div class="card info-card">
+            <h3>Capture Health</h3>
+            <div id="capture-status" class="status-pill status-unknown">No data</div>
+            <div id="capture-metrics" class="meta-list capture-grid">
+              <p><strong>avgRate</strong>: <span id="cap-avgRate">--</span> Hz</p>
+              <p><strong>medianDt</strong>: <span id="cap-medianDt">--</span> ms</p>
+              <p><strong>maxDt</strong>: <span id="cap-maxDt">--</span> ms</p>
+              <p><strong>%gaps&gt;4ms</strong>: <span id="cap-gapsPct">--</span>%</p>
+              <p><strong>maxGap</strong>: <span id="cap-maxGap">--</span> ms</p>
+              <p><strong>packets</strong>: <span id="cap-packets">--</span></p>
+              <p><strong>invalidLen</strong>: <span id="cap-invalid">--</span></p>
+              <p><strong>missingSamples</strong>: <span id="cap-missing">--</span></p>
+              <p><strong>droppedPackets</strong>: <span id="cap-dropped">--</span></p>
+            </div>
+          </div>
+
           <div class="tabs-nav">
             <button class="tab-btn active" data-tab="raw">🔬 Raw</button>
             <button class="tab-btn" data-tab="processed">📊 Processed</button>
@@ -84,16 +100,36 @@
                   <thead>
                     <tr>
                       <th>TS (ms)</th>
+                      <th>Δt (ms)</th>
                       <th>ax</th>
                       <th>ay</th>
                       <th>az</th>
                       <th>gx</th>
                       <th>gy</th>
                       <th>gz</th>
+                      <th>hwTs16</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-muted);">Please load a JSON file</td></tr>
+                    <tr><td colspan="9" style="text-align: center; padding: 40px; color: var(--text-muted);">Please load a JSON file</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <h4 style="margin-top:20px;">Raw Packets</h4>
+              <div class="table-container">
+                <table id="packet-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>receivedAt (ms)</th>
+                      <th>Δt (ms)</th>
+                      <th>len</th>
+                      <th>sampleCount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr><td colspan="5" style="text-align: center; padding: 20px; color: var(--text-muted);">No packets loaded</td></tr>
                   </tbody>
                 </table>
               </div>
