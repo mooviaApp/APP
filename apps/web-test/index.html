@@ -79,8 +79,12 @@
               <p><strong>maxGap</strong>: <span id="cap-maxGap">--</span> ms</p>
               <p><strong>packets</strong>: <span id="cap-packets">--</span></p>
               <p><strong>invalidLen</strong>: <span id="cap-invalid">--</span></p>
+              <p><strong>missingPackets</strong>: <span id="cap-missingPackets">--</span></p>
               <p><strong>missingSamples</strong>: <span id="cap-missing">--</span></p>
+              <p><strong>duplicatePackets</strong>: <span id="cap-duplicates">--</span></p>
+              <p><strong>reorderedPackets</strong>: <span id="cap-reordered">--</span></p>
               <p><strong>droppedPackets</strong>: <span id="cap-dropped">--</span></p>
+              <p><strong>effectiveTick</strong>: <span id="cap-effectiveTick">--</span> µs</p>
             </div>
           </div>
 
@@ -132,6 +136,7 @@
                   <thead>
                     <tr>
                       <th>#</th>
+                      <th>seq16</th>
                       <th>receivedAt (ms)</th>
                       <th>Δt (ms)</th>
                       <th>len</th>
@@ -139,7 +144,7 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr><td colspan="5" style="text-align: center; padding: 20px; color: var(--text-muted);">No packets loaded</td></tr>
+                    <tr><td colspan="6" style="text-align: center; padding: 20px; color: var(--text-muted);">No packets loaded</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -174,7 +179,14 @@
                 </div>
               </div>
               <div class="card plotter-card">
-                <h3>Trajectory Plan View (X vs Z)</h3>
+                <div class="card-heading">
+                  <h3 id="path-2d-title">Trajectory Plan View (|XY| vs Z)</h3>
+                  <div class="projection-switch">
+                    <button class="projection-btn active" data-projection="norm">|XY| vs Z</button>
+                    <button class="projection-btn" data-projection="x">X vs Z</button>
+                    <button class="projection-btn" data-projection="y">Y vs Z</button>
+                  </div>
+                </div>
                 <div class="canvas-container h-300">
                   <canvas id="path-2d-chart"></canvas>
                 </div>
@@ -183,9 +195,26 @@
           </div>
 
           <div id="tab-analysis" class="tab-pane">
-            <div class="card plotter-card">
-              <h3>Kalman State Bias & Drift</h3>
-              <p class="text-muted">Coming soon...</p>
+            <div class="grid-2">
+              <div class="card plotter-card">
+                <h3>Geometry Diagnostics</h3>
+                <p id="analysis-note" class="text-muted notice">
+                  La trayectoria 3D es una reconstrucciÃ³n relativa basada solo en IMU; el yaw puede derivar.
+                </p>
+                <div id="geometry-meta" class="meta-list analysis-list">
+                  <p>No data loaded</p>
+                </div>
+              </div>
+              <div class="card plotter-card">
+                <h3>Trajectory 3D</h3>
+                <div id="trajectory-3d" class="plotly-container"></div>
+              </div>
+            </div>
+            <div class="card plotter-card mt-20">
+              <h3>Algorithm Limits</h3>
+              <div id="algorithm-limits" class="meta-list analysis-list">
+                <p>No data loaded</p>
+              </div>
             </div>
           </div>
         </div>

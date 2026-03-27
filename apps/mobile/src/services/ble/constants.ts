@@ -1,25 +1,45 @@
-/**
+﻿/**
  * BLE Service Constants for MOOVIA IMU Sensor
- * 
- * Defines UUIDs, commands, and message types for communication
- * with the WBZ351 microcontroller and ICM-42688-P sensor.
+ *
+ * Defines UUIDs, commands, message types and session/export types used by the
+ * mobile app when talking to the WBZ351 + ICM-42688-P firmware.
  */
 
 // ============================================================================
 // Service and Characteristic UUIDs
 // ============================================================================
 
-export const BLE_SERVICE_UUID = '78563412-7856-3412-7856-341278563412';
+export const BLE_SERVICE_UUID = '78563412-3412-7856-1234-567812345678';
+export const BLE_CCCD_UUID = '00002902-0000-1000-8000-00805f9b34fb';
+export const BLE_SERVICE_UUID_ALIASES = [
+    '78563412-3412-7856-1234-567812345678',
+    '78563412-7856-3412-7856-341278563412',
+] as const;
 
 export const BLE_CHARACTERISTICS = {
-    /** Characteristic 0: IMU Data (Read, Notify) */
-    DATA: '01000000-7856-3412-7856-341278563412',
+    /** Characteristic 0: IMU Data (Notify) */
+    DATA: '78563412-3412-7856-1234-567800000001',
 
     /** Characteristic 1: Commands (Write Without Response) */
-    COMMAND: '02000000-7856-3412-7856-341278563412',
+    COMMAND: '78563412-3412-7856-1234-567800000002',
 
-    /** Characteristic 2: Logs and Responses (Read, Notify) */
-    LOG: '03000000-7856-3412-7856-341278563412',
+    /** Characteristic 2: Logs and Responses (Notify) */
+    LOG: '78563412-3412-7856-1234-567800000003',
+} as const;
+
+export const BLE_CHARACTERISTIC_UUID_ALIASES = {
+    DATA: [
+        '78563412-3412-7856-1234-567800000001',
+        '01000000-7856-3412-7856-341278563412',
+    ],
+    COMMAND: [
+        '78563412-3412-7856-1234-567800000002',
+        '02000000-7856-3412-7856-341278563412',
+    ],
+    LOG: [
+        '78563412-3412-7856-1234-567800000003',
+        '03000000-7856-3412-7856-341278563412',
+    ],
 } as const;
 
 // ============================================================================
@@ -27,16 +47,9 @@ export const BLE_CHARACTERISTICS = {
 // ============================================================================
 
 export const BLE_COMMANDS = {
-    /** Request WHO_AM_I register value (should return 0x47) */
     WHO_AM_I: 0x01,
-
-    /** Start streaming IMU data */
     STREAM_ON: 0x02,
-
-    /** Stop streaming IMU data */
     STREAM_OFF: 0x03,
-
-    /** Reset/reinitialize the IMU sensor */
     RESET_IMU: 0x04,
 } as const;
 
@@ -45,13 +58,8 @@ export const BLE_COMMANDS = {
 // ============================================================================
 
 export const MESSAGE_TYPES = {
-    /** IMU sample data packet (181 bytes: type + 15 samples × 12 bytes) */
     SAMPLE: 0x02,
-
-    /** Log message (ASCII text) */
     LOG: 0x03,
-
-    /** WHO_AM_I response (1 byte value) */
     WHO_AM_I_RESPONSE: 0x04,
 } as const;
 
@@ -60,43 +68,19 @@ export const MESSAGE_TYPES = {
 // ============================================================================
 
 export const SENSOR_CONFIG = {
-    /** Device name to scan for */
     DEVICE_NAME: 'MOOVIA',
-
-    /** Expected WHO_AM_I value for ICM-42688-P */
     EXPECTED_WHO_AM_I: 0x47,
-
-    /** Gyroscope range in degrees per second */
     GYRO_RANGE_DPS: 1000,
-
-    /** Accelerometer range in g */
     ACCEL_RANGE_G: 8,
-
-    /** Output Data Rate in Hz (1 kHz = 1 sample per ms) */
     ODR_HZ: 1000,
-
-    /** Number of samples per BLE packet from firmware */
     SAMPLES_PER_PACKET: 15,
-
-    /** Bytes per sample (6 int16 values + 1 uint16 timestamp = 14 bytes) */
+    PACKET_HEADER_BYTES: 3,
     BYTES_PER_SAMPLE: 14,
-
-    /** Total packet size (1 byte type + 15 samples × 14 bytes) */
-    PACKET_SIZE_BYTES: 211,
-
-    /** Expected sample interval in ms (1 ms per sample) */
+    PACKET_SIZE_BYTES: 213,
     SAMPLE_INTERVAL_MS: 1,
-
-    /** Packet interval in ms (15 samples at 1 kHz = 15 ms) */
     PACKET_INTERVAL_MS: 15,
-
-    /** Batch size for sending to backend (number of packets to accumulate) */
-    BATCH_SIZE_PACKETS: 4, // 4 packets × 15 samples = 60 samples = 60 ms
-
-    /** Total samples in a batch for backend */
-    BATCH_SIZE_SAMPLES: 60, // 4 packets × 15 samples
-
-    /** Timestamp tick duration in microseconds (ICM-42688-P: 32/30 us per tick) */
+    BATCH_SIZE_PACKETS: 4,
+    BATCH_SIZE_SAMPLES: 60,
     TIMESTAMP_TICK_US: 32.0 / 30.0,
 } as const;
 
@@ -105,19 +89,11 @@ export const SENSOR_CONFIG = {
 // ============================================================================
 
 export const BLE_CONFIG = {
-    /** Required MTU size for 211-byte packets (211 + 3 bytes overhead + margin) */
     REQUIRED_MTU: 247,
-
-    /** Scan timeout in milliseconds */
+    MIN_STREAM_MTU: 216,
     SCAN_TIMEOUT_MS: 10000,
-
-    /** Connection timeout in milliseconds */
     CONNECTION_TIMEOUT_MS: 5000,
-
-    /** Auto-reconnect on disconnection */
     AUTO_RECONNECT: true,
-
-    /** Max reconnection attempts */
     MAX_RECONNECT_ATTEMPTS: 3,
 } as const;
 
@@ -129,25 +105,16 @@ export type BLECommand = typeof BLE_COMMANDS[keyof typeof BLE_COMMANDS];
 export type MessageType = typeof MESSAGE_TYPES[keyof typeof MESSAGE_TYPES];
 
 export interface IMUSample {
-    // Raw Data (15 samples per packet)
     ax: number;
     ay: number;
     az: number;
     gx: number;
-
-    /** Gyroscope Y-axis (dps) */
     gy: number;
-
-    /** Gyroscope Z-axis (dps) */
     gz: number;
-
-    /** Timestamp in ISO 8601 format (Legacy) */
     timestamp?: string;
-
-    /** Monotonic timestamp in milliseconds (Preferred) */
     timestampMs: number;
-    /** Hardware tick (uint16) from the packet, optional */
     hwTs16?: number;
+    packetSeq16?: number;
 }
 
 export interface LogMessage {
@@ -167,6 +134,29 @@ export interface RawPacketRecord {
     length: number;
     sampleCount: number;
     index: number;
+    seq16?: number;
+}
+
+export interface SessionTransportState {
+    deviceName: string | null;
+    deviceAddress: string | null;
+    connectedAt: string | null;
+    disconnectedAt: string | null;
+    mtuRequested: number;
+    mtuNegotiated: number;
+    phyRequested: string | null;
+    phyActualTx: string | null;
+    phyActualRx: string | null;
+    connectionPriorityRequested: 'BALANCED' | 'HIGH' | 'LOW_POWER' | null;
+    packetsReceived: number;
+    samplesReceived: number;
+    missingPackets: number;
+    missingSamples: number;
+    duplicatePackets: number;
+    reorderedPackets: number;
+    whoAmI: number | null;
+    firmwareSummaryLine: string | null;
+    disconnectReasonFromFirmware: string | null;
 }
 
 export interface RawSessionExport {
@@ -180,5 +170,6 @@ export interface RawSessionExport {
         totalPackets: number;
         durationMs: number;
         avgSampleRateHz: number;
+        session: SessionTransportState;
     };
 }

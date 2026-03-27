@@ -106,7 +106,7 @@ export function BLEDeviceScreen() {
             // DEBUG ALERT: Confirm data quantity to user
             Alert.alert(
                 "Resultados del Levantamiento",
-                `VMP: ${vmp.toFixed(2)} m/s\nAceleraciÃ³n Pico: ${peakAcc.toFixed(2)} m/sÂ²\nAltura MÃ¡xima: ${height.toFixed(2)} m\nDesviaciÃ³n Lateral: ${lateral.toFixed(2)} m`
+                `VMP: ${vmp.toFixed(2)} m/s\nAceleracion Pico: ${peakAcc.toFixed(2)} m/s²\nAltura maxima: ${height.toFixed(2)} m\nAltura asentada: ${analysis.movementMetrics.settledEndHeight.toFixed(2)} m\nLateral activa: ${analysis.movementMetrics.activeEndLateral.toFixed(2)} m\nLateral asentada: ${analysis.movementMetrics.settledEndLateral.toFixed(2)} m`
             );
         } catch (e: any) {
             Alert.alert("Error", "Failed to stop stream: " + e.message);
@@ -386,10 +386,22 @@ export function BLEDeviceScreen() {
                                     <Text style={styles.captureLabel}>invalidLen</Text><Text style={styles.captureValue}>{captureStats.invalidPackets}</Text>
                                 </View>
                                 <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>missingPackets</Text><Text style={styles.captureValue}>{captureStats.missingPackets}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>missingSamples</Text><Text style={styles.captureValue}>{captureStats.estimatedMissingSamples.toFixed(0)}</Text>
                                 </View>
                                 <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>duplicatePackets</Text><Text style={styles.captureValue}>{captureStats.duplicatePackets}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>reorderedPackets</Text><Text style={styles.captureValue}>{captureStats.reorderedPackets}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>droppedPackets</Text><Text style={styles.captureValue}>{captureStats.droppedPackets}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>effectiveTick</Text><Text style={styles.captureValue}>{captureStats.effectiveTickUs ? `${captureStats.effectiveTickUs.toFixed(2)} us` : '--'}</Text>
                                 </View>
                             </View>
                         )}
@@ -406,19 +418,60 @@ export function BLEDeviceScreen() {
                                 </View>
                                 <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>movimiento</Text>
-                                    <Text style={styles.captureValue}>{((sessionAnalysis.movementSegment.endTimeMs - sessionAnalysis.movementSegment.startTimeMs) / 1000).toFixed(2)} s</Text>
+                                    <Text style={styles.captureValue}>{(sessionAnalysis.movementSegment.activeDurationMs / 1000).toFixed(2)} s</Text>
                                 </View>
                                 <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>idle final</Text>
                                     <Text style={styles.captureValue}>{(sessionAnalysis.movementSegment.finalIdleMs / 1000).toFixed(2)} s</Text>
                                 </View>
                                 <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>trimmed tail</Text>
+                                    <Text style={styles.captureValue}>{(sessionAnalysis.movementSegment.trimmedTailMs / 1000).toFixed(2)} s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>end reason</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementSegment.endReason}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>confidence</Text>
                                     <Text style={styles.captureValue}>{sessionAnalysis.movementSegment.confidence}</Text>
                                 </View>
                                 <View style={styles.captureRow}>
-                                    <Text style={styles.captureLabel}>altura final</Text>
-                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.finalHeight.toFixed(2)} m</Text>
+                                    <Text style={styles.captureLabel}>residual speed</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.residualSpeedAtEnd.toFixed(3)} m/s</Text>
+                                </View>
+                            </View>
+                        )}
+
+                        {sessionAnalysis && (
+                            <View style={styles.captureCard}>
+                                <Text style={styles.sectionTitle}>Trajectory Summary</Text>
+                                <Text style={styles.captureHint}>
+                                    La trayectoria mostrada usa el tramo activo estabilizado; la posicion asentada final se reporta aparte.
+                                </Text>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>altura activa</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.activeEndHeight.toFixed(2)} m</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>altura asentada</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.settledEndHeight.toFixed(2)} m</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>lateral activa</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.activeEndLateral.toFixed(2)} m</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>lateral asentada</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.settledEndLateral.toFixed(2)} m</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>barAxis</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.diagnostics.barAxisConfidence}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>effectiveTick</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.diagnostics.effectiveTickUs ? `${sessionAnalysis.diagnostics.effectiveTickUs.toFixed(2)} us` : '--'}</Text>
                                 </View>
                             </View>
                         )}

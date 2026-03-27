@@ -19,8 +19,9 @@ export const SENSOR_CONFIG = {
     ACCEL_RANGE_G: 8,
     ODR_HZ: 1000,
     SAMPLES_PER_PACKET: 15,
+    PACKET_HEADER_BYTES: 3,
     BYTES_PER_SAMPLE: 14,
-    PACKET_SIZE_BYTES: 211,
+    PACKET_SIZE_BYTES: 213,
     SAMPLE_INTERVAL_MS: 1,
     PACKET_INTERVAL_MS: 15,
     TIMESTAMP_TICK_US: 32.0 / 30.0,
@@ -59,6 +60,8 @@ export interface IMUSample {
     timestampMs: number;
     /** Hardware 16-bit timestamp from packet (ticks), optional */
     hwTs16?: number;
+    /** Packet sequence (uint16) from the BLE packet header, optional */
+    packetSeq16?: number;
 }
 
 export interface RawIMUPacket {
@@ -94,8 +97,17 @@ export interface MovementSegment {
     endIndex: number;
     startTimeMs: number;
     endTimeMs: number;
+    activeDurationMs: number;
     initialIdleMs: number;
     finalIdleMs: number;
+    trimmedTailMs: number;
+    endReason: 'final_idle' | 'quiet_tail' | 'fallback';
+    residualVelocityAtEnd: {
+        x: number;
+        y: number;
+        z: number;
+        speed: number;
+    };
     confidence: 'segmented' | 'fallback' | 'insufficient';
 }
 
@@ -106,6 +118,22 @@ export interface SessionMovementMetrics {
     finalHeight: number;
     maxLateral: number;
     finalLateral: number;
+    activeEndHeight: number;
+    settledEndHeight: number;
+    activeEndLateral: number;
+    settledEndLateral: number;
+    residualSpeedAtEnd: number;
+}
+
+export interface SessionEndPoint {
+    timestamp: number;
+    position: Vec3;
+    relativePosition: Vec3;
+}
+
+export interface SessionAnalysisDiagnostics {
+    barAxisConfidence: 'high' | 'low' | 'unavailable';
+    effectiveTickUs: number | null;
 }
 
 export interface SessionAnalysisSummary {
@@ -113,6 +141,9 @@ export interface SessionAnalysisSummary {
     movementMetrics: SessionMovementMetrics;
     activePath: TrajectoryPoint[];
     fullPath: TrajectoryPoint[];
+    activeEndPoint: SessionEndPoint | null;
+    settledEndPoint: SessionEndPoint | null;
+    diagnostics: SessionAnalysisDiagnostics;
 }
 
 export interface CaptureHealthStats {
@@ -125,7 +156,11 @@ export interface CaptureHealthStats {
     invalidPackets: number;
     estimatedMissingSamples: number;
     droppedPackets: number;
+    missingPackets: number;
+    duplicatePackets: number;
+    reorderedPackets: number;
     durationMs: number;
+    effectiveTickUs: number | null;
 }
 
 export interface RawPacketRecord {
@@ -139,9 +174,33 @@ export interface RawPacketRecord {
     sampleCount: number;
     /** Monotonic index of the packet within the session (starting at 0) */
     index: number;
+    /** Packet sequence from the IMU packet header, if available */
+    seq16?: number;
 }
 
 /** Raw-only export (no processed trajectory) */
+export interface SessionTransportState {
+    deviceName: string | null;
+    deviceAddress: string | null;
+    connectedAt: string | null;
+    disconnectedAt: string | null;
+    mtuRequested: number;
+    mtuNegotiated: number;
+    phyRequested: string | null;
+    phyActualTx: string | null;
+    phyActualRx: string | null;
+    connectionPriorityRequested: 'BALANCED' | 'HIGH' | 'LOW_POWER' | null;
+    packetsReceived: number;
+    samplesReceived: number;
+    missingPackets: number;
+    missingSamples: number;
+    duplicatePackets: number;
+    reorderedPackets: number;
+    whoAmI: number | null;
+    firmwareSummaryLine: string | null;
+    disconnectReasonFromFirmware: string | null;
+}
+
 export interface RawSessionExport {
     version: string;
     exportedAt: string;
@@ -153,6 +212,7 @@ export interface RawSessionExport {
         totalPackets: number;
         durationMs: number;
         avgSampleRateHz: number;
+        session?: SessionTransportState;
     };
 }
 

@@ -7,6 +7,10 @@ import {
 
 const GAP_THRESHOLD_MS = 4;
 
+function deltaTicks16(prev: number, curr: number) {
+    return (curr - prev + 0x10000) & 0xFFFF;
+}
+
 function median(values: number[]): number {
     if (values.length === 0) return 0;
     const sorted = [...values].sort((a, b) => a - b);
@@ -21,6 +25,54 @@ export function analyzeCaptureHealth(
     rawPackets: RawPacketRecord[] = [],
     expectedHz: number = SENSOR_CONFIG.ODR_HZ,
 ): CaptureHealthStats {
+    let maxPacketGapMs = 0;
+    let invalidPackets = 0;
+    let droppedPackets = 0;
+    let missingPackets = 0;
+    let duplicatePackets = 0;
+    let reorderedPackets = 0;
+    let lastSeq16: number | null = null;
+    let effectiveTickUs: number | null = null;
+
+    rawPackets.forEach((packet, index) => {
+        if (packet.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
+            invalidPackets++;
+        }
+        if (packet.sampleCount < SENSOR_CONFIG.SAMPLES_PER_PACKET) {
+            droppedPackets++;
+        }
+        if (index > 0) {
+            const gap = packet.receivedAt - rawPackets[index - 1].receivedAt;
+            if (gap > maxPacketGapMs) maxPacketGapMs = gap;
+        }
+
+        if (typeof packet.seq16 !== 'number') {
+            return;
+        }
+
+        if (lastSeq16 === null) {
+            lastSeq16 = packet.seq16;
+            return;
+        }
+
+        const delta = (packet.seq16 - lastSeq16 + 0x10000) & 0xFFFF;
+        if (delta === 1) {
+            lastSeq16 = packet.seq16;
+            return;
+        }
+        if (delta === 0) {
+            duplicatePackets++;
+            return;
+        }
+        if (delta > 1 && delta < 0x8000) {
+            missingPackets += delta - 1;
+            lastSeq16 = packet.seq16;
+            return;
+        }
+
+        reorderedPackets++;
+    });
+
     if (!samples || samples.length < 2) {
         return {
             avgRateHz: 0,
@@ -29,10 +81,14 @@ export function analyzeCaptureHealth(
             gapsPct: 0,
             maxGapMs: 0,
             totalPackets: rawPackets.length,
-            invalidPackets: 0,
-            estimatedMissingSamples: 0,
-            droppedPackets: 0,
+            invalidPackets,
+            estimatedMissingSamples: missingPackets * SENSOR_CONFIG.SAMPLES_PER_PACKET,
+            droppedPackets,
+            missingPackets,
+            duplicatePackets,
+            reorderedPackets,
             durationMs: 0,
+            effectiveTickUs,
         };
     }
 
@@ -50,20 +106,25 @@ export function analyzeCaptureHealth(
         ? (dts.filter((dt) => dt > GAP_THRESHOLD_MS).length / dts.length) * 100
         : 0;
 
-    let maxPacketGapMs = 0;
-    let invalidPackets = 0;
-    let droppedPackets = 0;
-    rawPackets.forEach((packet, index) => {
-        if (packet.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) invalidPackets++;
-        if (packet.sampleCount === 0) droppedPackets++;
-        if (index > 0) {
-            const gap = packet.receivedAt - rawPackets[index - 1].receivedAt;
-            if (gap > maxPacketGapMs) maxPacketGapMs = gap;
-        }
-    });
-
     const expectedSamples = durationMs > 0 ? Math.round((durationMs / 1000) * expectedHz) : 0;
-    const estimatedMissingSamples = Math.max(0, expectedSamples - sortedSamples.length);
+    const estimatedFromRate = Math.max(0, expectedSamples - sortedSamples.length);
+    const estimatedMissingSamples = missingPackets > 0
+        ? missingPackets * SENSOR_CONFIG.SAMPLES_PER_PACKET
+        : estimatedFromRate;
+
+    const hwTickDeltas: number[] = [];
+    for (let i = 0; i < sortedSamples.length - 1; i++) {
+        const prev = sortedSamples[i].hwTs16;
+        const curr = sortedSamples[i + 1].hwTs16;
+        if (typeof prev !== 'number' || typeof curr !== 'number') continue;
+        const delta = deltaTicks16(prev, curr);
+        if (delta > 0) hwTickDeltas.push(delta);
+    }
+    if (hwTickDeltas.length > 0 && expectedHz > 0) {
+        const medianTickDelta = median(hwTickDeltas);
+        const expectedSampleIntervalUs = 1_000_000 / expectedHz;
+        effectiveTickUs = expectedSampleIntervalUs / medianTickDelta;
+    }
 
     return {
         avgRateHz,
@@ -75,6 +136,10 @@ export function analyzeCaptureHealth(
         invalidPackets,
         estimatedMissingSamples,
         droppedPackets,
+        missingPackets,
+        duplicatePackets,
+        reorderedPackets,
         durationMs,
+        effectiveTickUs,
     };
 }

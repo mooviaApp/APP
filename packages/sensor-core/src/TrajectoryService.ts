@@ -35,6 +35,8 @@
 import {
     IMUSample,
     MovementSegment,
+    SessionAnalysisDiagnostics,
+    SessionEndPoint,
     SessionAnalysisSummary,
     SessionMovementMetrics,
     TrajectoryPoint,
@@ -298,8 +300,10 @@ export class TrajectoryService {
     private lastIsStat: boolean = false;
     // Bar sleeve spin compensation
     private barAxis: Vec3 | null = null; // unit vector in sensor frame
+    private barAxisConfidence: SessionAnalysisDiagnostics['barAxisConfidence'] = 'unavailable';
     private barAxisBuffer: Vec3[] = [];
-    private readonly BAR_AXIS_SAMPLES = 600; // ~0.6s @1kHz
+    private readonly BAR_AXIS_SAMPLES = 120;
+    private readonly BAR_AXIS_MIN_GYRO_DPS = 20;
     // Rep state machine
     private repState: 'IDLE' | 'MOVING' | 'APEX' | 'RETURN' = 'IDLE';
     private maxLateral: number = 0;
@@ -307,6 +311,10 @@ export class TrajectoryService {
     private readonly MIN_MOVEMENT_SECONDS = 0.08;
     private readonly MOVEMENT_LIN_ACC_THRESHOLD = 0.35;
     private readonly MOVEMENT_VZ_THRESHOLD = 0.05;
+    private readonly MOVEMENT_GYRO_THRESHOLD_DPS = 8;
+    private readonly END_QUIET_SECONDS = 0.15;
+    private readonly END_QUIET_LIN_ACC_THRESHOLD = 0.12;
+    private readonly END_QUIET_GYRO_THRESHOLD_DPS = 1.5;
 
     constructor(expectedHz: number = 1000) {
         this.setExpectedHz(expectedHz);
@@ -367,6 +375,7 @@ export class TrajectoryService {
         this.gravity_estimate = { x: 0, y: 0, z: this.GRAVITY };
         // Reset bar spin estimation
         this.barAxis = null;
+        this.barAxisConfidence = 'unavailable';
         this.barAxisBuffer = [];
         // Reset rep tracking
         this.repState = 'IDLE';
@@ -431,11 +440,19 @@ export class TrajectoryService {
             z: sample.gz * (Math.PI / 180),
         };
 
-        // Collect gyro for bar-axis estimation (~0.6s inicial)
-        if (this.barAxisBuffer.length < this.BAR_AXIS_SAMPLES && !this.isCalibrating) {
+        // Collect only energetic gyro samples so the sleeve axis is not frozen during idle.
+        const wMagDpsRaw = Math.sqrt(
+            w_meas.x * w_meas.x +
+            w_meas.y * w_meas.y +
+            w_meas.z * w_meas.z,
+        ) * (180 / Math.PI);
+        if (!this.isCalibrating && !this.barAxis && wMagDpsRaw >= this.BAR_AXIS_MIN_GYRO_DPS) {
             this.barAxisBuffer.push({ ...w_meas });
-            if (this.barAxisBuffer.length === this.BAR_AXIS_SAMPLES) {
-                this.barAxis = this.estimateBarAxis(this.barAxisBuffer);
+            if (this.barAxisBuffer.length >= this.BAR_AXIS_SAMPLES) {
+                const axisEstimate = this.estimateBarAxis(this.barAxisBuffer);
+                this.barAxis = axisEstimate.axis;
+                this.barAxisConfidence = axisEstimate.confidence;
+                this.barAxisBuffer = [];
             }
         }
 
@@ -748,17 +765,48 @@ export class TrajectoryService {
         if (this.gyroBuffer.length > this.bufferSize) this.gyroBuffer.shift();
     }
 
-    /** Estima el eje principal de giro (barAxis) a partir de muestras de gyro. */
-    private estimateBarAxis(buf: Vec3[]): Vec3 {
-        // Media de omega
+    /** Estima el eje principal de giro (barAxis) a partir de muestras de gyro energéticas. */
+    private estimateBarAxis(buf: Vec3[]): { axis: Vec3 | null; confidence: SessionAnalysisDiagnostics['barAxisConfidence'] } {
+        if (buf.length < Math.max(20, Math.floor(this.BAR_AXIS_SAMPLES * 0.5))) {
+            return { axis: null, confidence: 'unavailable' };
+        }
+
         let sx = 0, sy = 0, sz = 0;
-        buf.forEach(w => { sx += w.x; sy += w.y; sz += w.z; });
-        const n = buf.length || 1;
-        const axis = Vec3Math.normalize({ x: sx / n, y: sy / n, z: sz / n });
-        // Fallback si norma ~0
-        const norm = Vec3Math.norm(axis);
-        if (norm < 1e-3) return { x: 0, y: 0, z: 1 };
-        return axis;
+        let avgNorm = 0;
+        for (const w of buf) {
+            sx += w.x;
+            sy += w.y;
+            sz += w.z;
+            avgNorm += Vec3Math.norm(w);
+        }
+
+        avgNorm /= buf.length;
+        if (avgNorm < 1e-3) {
+            return { axis: null, confidence: 'unavailable' };
+        }
+
+        const meanVec = { x: sx / buf.length, y: sy / buf.length, z: sz / buf.length };
+        const meanNorm = Vec3Math.norm(meanVec);
+        if (meanNorm < 1e-3) {
+            return { axis: null, confidence: 'low' };
+        }
+
+        const axis = Vec3Math.normalize(meanVec);
+        let alignmentSum = 0;
+        for (const w of buf) {
+            const wNorm = Vec3Math.norm(w);
+            if (wNorm < 1e-6) continue;
+            const dot = Math.abs((w.x * axis.x + w.y * axis.y + w.z * axis.z) / wNorm);
+            alignmentSum += dot;
+        }
+        const meanAlignment = alignmentSum / buf.length;
+        const dominance = meanNorm / avgNorm;
+        const confidence: SessionAnalysisDiagnostics['barAxisConfidence'] =
+            dominance > 0.75 && meanAlignment > 0.85 ? 'high' : 'low';
+
+        return confidence === 'high'
+            ? { axis, confidence }
+            : { axis: null, confidence };
     }
 
     /** Actualiza máquina de estados de repetición para consolidar métricas al cerrar ciclo. */
@@ -860,6 +908,18 @@ export class TrajectoryService {
             finalHeight: 0,
             maxLateral: 0,
             finalLateral: 0,
+            activeEndHeight: 0,
+            settledEndHeight: 0,
+            activeEndLateral: 0,
+            settledEndLateral: 0,
+            residualSpeedAtEnd: 0,
+        };
+    }
+
+    private getEmptyDiagnostics(): SessionAnalysisDiagnostics {
+        return {
+            barAxisConfidence: this.barAxisConfidence,
+            effectiveTickUs: null,
         };
     }
 
@@ -893,6 +953,28 @@ export class TrajectoryService {
         return (end.timestamp - start.timestamp) + (end.dtMs ?? 0);
     }
 
+    private estimateEffectiveTickUsFromRecords(records: TrajectoryRecord[]): number | null {
+        const dtUs = records
+            .map((record) => record.dtMs ?? 0)
+            .filter((dtMs) => dtMs > 0 && dtMs < 10)
+            .map((dtMs) => dtMs * 1000);
+
+        if (dtUs.length === 0) return null;
+        const sorted = [...dtUs].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0
+            ? (sorted[mid - 1] + sorted[mid]) / 2
+            : sorted[mid];
+    }
+
+    private buildEndPoint(timestamp: number, position: Vec3, baseline: Vec3): SessionEndPoint {
+        return {
+            timestamp,
+            position: { ...position },
+            relativePosition: this.relativeFromBaseline(position, baseline),
+        };
+    }
+
     private findStationarySegments(): Array<{ startIndex: number; endIndex: number; durationMs: number }> {
         const segments: Array<{ startIndex: number; endIndex: number; durationMs: number }> = [];
         let segmentStart = -1;
@@ -924,9 +1006,14 @@ export class TrajectoryService {
         return segments.filter((segment) => segment.durationMs >= this.MIN_IDLE_SECONDS * 1000);
     }
 
-    private isMovementRecord(record: TrajectoryRecord): boolean {
+    private isMovementStartRecord(record: TrajectoryRecord): boolean {
         return (record.linAccMag ?? 0) > this.MOVEMENT_LIN_ACC_THRESHOLD
-            || Math.abs(record.v_raw.z) > this.MOVEMENT_VZ_THRESHOLD;
+            || (record.gyroMagDps ?? 0) > this.MOVEMENT_GYRO_THRESHOLD_DPS;
+    }
+
+    private isSettlingQuietRecord(record: TrajectoryRecord): boolean {
+        return (record.linAccMag ?? Number.POSITIVE_INFINITY) < this.END_QUIET_LIN_ACC_THRESHOLD
+            && (record.gyroMagDps ?? Number.POSITIVE_INFINITY) < this.END_QUIET_GYRO_THRESHOLD_DPS;
     }
 
     private detectMovementStart(fromIndex: number, toIndex: number): number {
@@ -938,7 +1025,7 @@ export class TrajectoryService {
         for (let i = fromIndex; i <= toIndex; i++) {
             const record = this.rawDataBuffer[i];
             const dtMs = Math.max(record.dtMs ?? 0, 1);
-            if (this.isMovementRecord(record)) {
+            if (this.isMovementStartRecord(record)) {
                 if (activeMs === 0) candidateStart = i;
                 activeMs += dtMs;
                 if (activeMs >= this.MIN_MOVEMENT_SECONDS * 1000) {
@@ -961,7 +1048,7 @@ export class TrajectoryService {
         for (let i = fromIndex; i <= toIndex; i++) {
             const record = this.rawDataBuffer[i];
             const dtMs = Math.max(record.dtMs ?? 0, 1);
-            if (this.isMovementRecord(record)) {
+            if (this.isMovementStartRecord(record)) {
                 activeMs += dtMs;
                 if (activeMs >= this.MIN_MOVEMENT_SECONDS * 1000) {
                     lastConfirmedEnd = i;
@@ -972,6 +1059,54 @@ export class TrajectoryService {
         }
 
         return Math.max(fromIndex, lastConfirmedEnd);
+    }
+
+    private trimTrailingQuietWindow(fromIndex: number, toIndex: number): {
+        endIndex: number;
+        trimmedTailMs: number;
+        killApplied: boolean;
+    } {
+        if (toIndex < fromIndex) {
+            return { endIndex: fromIndex, trimmedTailMs: 0, killApplied: false };
+        }
+
+        const requiredQuietMs = this.END_QUIET_SECONDS * 1000;
+        let quietMs = 0;
+        let quietStart = -1;
+
+        for (let i = toIndex; i >= fromIndex; i--) {
+            const record = this.rawDataBuffer[i];
+            const dtMs = Math.max(record.dtMs ?? 0, 1);
+
+            if (this.isSettlingQuietRecord(record)) {
+                quietMs += dtMs;
+                quietStart = i;
+                continue;
+            }
+
+            if (quietMs >= requiredQuietMs) {
+                const endIndex = Math.max(fromIndex, i);
+                return {
+                    endIndex,
+                    trimmedTailMs: this.getDurationMs(endIndex + 1, toIndex),
+                    killApplied: true,
+                };
+            }
+
+            quietMs = 0;
+            quietStart = -1;
+        }
+
+        if (quietMs >= requiredQuietMs) {
+            const endIndex = Math.max(fromIndex, quietStart - 1);
+            return {
+                endIndex,
+                trimmedTailMs: this.getDurationMs(endIndex + 1, toIndex),
+                killApplied: true,
+            };
+        }
+
+        return { endIndex: toIndex, trimmedTailMs: 0, killApplied: false };
     }
 
     private averagePosition(startIndex: number, endIndex: number): Vec3 {
@@ -1029,7 +1164,9 @@ export class TrajectoryService {
     private computeMovementMetrics(
         records: TrajectoryRecord[],
         path: TrajectoryPoint[],
-        settledFinalRelative?: Vec3,
+        activeEndRelative: Vec3,
+        settledFinalRelative: Vec3,
+        residualSpeedAtEnd: number,
     ): SessionMovementMetrics {
         if (records.length === 0 || path.length === 0) return this.getEmptyMetrics();
 
@@ -1062,26 +1199,38 @@ export class TrajectoryService {
             }
         }
 
-        const lastPoint = path[path.length - 1];
-        const finalRelative = settledFinalRelative ?? lastPoint.relativePosition;
+        const activeEndLateral = Math.hypot(activeEndRelative.x, activeEndRelative.y);
+        const settledEndLateral = Math.hypot(settledFinalRelative.x, settledFinalRelative.y);
         return {
             peakLinearAcc,
             meanPropulsiveVelocity: velocityCount > 0 ? sumVelocity / velocityCount : 0,
             maxHeight,
-            finalHeight: finalRelative.z,
+            finalHeight: settledFinalRelative.z,
             maxLateral,
-            finalLateral: Math.hypot(finalRelative.x, finalRelative.y),
+            finalLateral: settledEndLateral,
+            activeEndHeight: activeEndRelative.z,
+            settledEndHeight: settledFinalRelative.z,
+            activeEndLateral,
+            settledEndLateral,
+            residualSpeedAtEnd,
         };
     }
 
     private buildSessionAnalysis(): SessionAnalysisSummary {
         const emptyMetrics = this.getEmptyMetrics();
+        const diagnostics: SessionAnalysisDiagnostics = {
+            barAxisConfidence: this.barAxisConfidence,
+            effectiveTickUs: this.estimateEffectiveTickUsFromRecords(this.rawDataBuffer),
+        };
         if (this.rawDataBuffer.length === 0) {
             return {
                 movementSegment: null,
                 movementMetrics: emptyMetrics,
                 activePath: [],
                 fullPath: [],
+                activeEndPoint: null,
+                settledEndPoint: null,
+                diagnostics,
             };
         }
 
@@ -1098,9 +1247,11 @@ export class TrajectoryService {
             confidence = 'fallback';
         }
 
-        let movementEnd = finalIdle
+        const candidateMovementEnd = finalIdle
             ? Math.max(movementStart, finalIdle.startIndex - 1)
             : this.detectFallbackMovementEnd(movementStart, this.rawDataBuffer.length - 1);
+        const quietTail = this.trimTrailingQuietWindow(movementStart, candidateMovementEnd);
+        let movementEnd = quietTail.endIndex;
 
         if (movementEnd < movementStart) {
             movementEnd = movementStart;
@@ -1111,14 +1262,44 @@ export class TrajectoryService {
         const fullPath = this.buildPathFromRecords(this.rawDataBuffer, baseline);
         const activeRawData = this.rawDataBuffer.slice(movementStart, movementEnd + 1);
         const activePath = fullPath.slice(movementStart, movementEnd + 1);
+        const activeEndRecord = activeRawData[activeRawData.length - 1] ?? this.rawDataBuffer[movementEnd];
+        const activeEndPoint = activePath.length > 0
+            ? this.buildEndPoint(activePath[activePath.length - 1].timestamp, activeEndRecord.p_raw, baseline)
+            : null;
         const settledFinalPosition = finalIdle
             ? this.averagePosition(finalIdle.startIndex, finalIdle.endIndex)
             : activeRawData[activeRawData.length - 1]?.p_raw ?? this.rawDataBuffer[movementEnd].p_raw;
+        const settledTimestamp = finalIdle
+            ? this.rawDataBuffer[finalIdle.endIndex]?.timestamp ?? this.rawDataBuffer[movementEnd].timestamp
+            : this.rawDataBuffer[movementEnd].timestamp;
+        const settledEndPoint = this.buildEndPoint(settledTimestamp, settledFinalPosition, baseline);
+        const rawResidualVelocity = activeEndRecord
+            ? {
+                x: activeEndRecord.v_raw.x,
+                y: activeEndRecord.v_raw.y,
+                z: activeEndRecord.v_raw.z,
+                speed: Math.sqrt(
+                    activeEndRecord.v_raw.x * activeEndRecord.v_raw.x +
+                    activeEndRecord.v_raw.y * activeEndRecord.v_raw.y +
+                    activeEndRecord.v_raw.z * activeEndRecord.v_raw.z,
+                ),
+            }
+            : { x: 0, y: 0, z: 0, speed: 0 };
+        const residualVelocity = quietTail.killApplied
+            ? { x: 0, y: 0, z: 0, speed: 0 }
+            : rawResidualVelocity;
         const metrics = this.computeMovementMetrics(
             activeRawData,
             activePath,
-            this.relativeFromBaseline(settledFinalPosition, baseline),
+            activeEndPoint?.relativePosition ?? Vec3Math.zero(),
+            settledEndPoint.relativePosition,
+            residualVelocity.speed,
         );
+        const endReason: MovementSegment['endReason'] = confidence === 'fallback'
+            ? 'fallback'
+            : quietTail.killApplied
+                ? 'quiet_tail'
+                : 'final_idle';
 
         this.activeRawData = activeRawData;
         this.fullPath = fullPath;
@@ -1131,13 +1312,20 @@ export class TrajectoryService {
                 endIndex: movementEnd,
                 startTimeMs: this.rawDataBuffer[movementStart]?.timestamp ?? this.rawDataBuffer[0].timestamp,
                 endTimeMs: this.rawDataBuffer[movementEnd]?.timestamp ?? this.rawDataBuffer[this.rawDataBuffer.length - 1].timestamp,
+                activeDurationMs: this.getDurationMs(movementStart, movementEnd),
                 initialIdleMs: initialIdle?.durationMs ?? 0,
                 finalIdleMs: finalIdle?.durationMs ?? 0,
+                trimmedTailMs: quietTail.trimmedTailMs,
+                endReason,
+                residualVelocityAtEnd: residualVelocity,
                 confidence,
             },
             movementMetrics: metrics,
             activePath,
             fullPath,
+            activeEndPoint,
+            settledEndPoint,
+            diagnostics,
         };
     }
 
@@ -1215,6 +1403,9 @@ export class TrajectoryService {
             movementMetrics: this.getEmptyMetrics(),
             activePath: this.path,
             fullPath: this.fullPath,
+            activeEndPoint: null,
+            settledEndPoint: null,
+            diagnostics: this.getEmptyDiagnostics(),
         };
     }
     /** Enable or disable real???time trajectory updates to the UI. */

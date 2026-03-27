@@ -1,0 +1,204 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\sisetup{output-decimal-marker={,}}
+
+\title{An\'alisis V3 del l\'imite IMU-only y cierre del tramo activo}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Resumen ejecutivo}
+Los JSON V3 confirman un cambio importante en el diagn\'ostico del proyecto: el cuello principal ya no es la transmisi\'on BLE. En las dos sesiones analizadas no aparecen p\'erdidas reales por \texttt{seq16} (\texttt{missingPackets = 0}), pero la trayectoria segu\'ia saliendo desvirtuada porque el algoritmo prolongaba el tramo activo cuando el gesto real ya hab\'ia terminado y la velocidad integrada quedaba contaminada.
+
+En esta iteraci\'on se implementa una separaci\'on expl\'icita entre:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{endpoint activo}: \'ultimo punto del gesto tras el recorte y estabilizaci\'on del tramo activo;
+  \item \textbf{endpoint asentado}: posici\'on media del reposo final.
+\end{itemize}
+
+El resultado no convierte el sistema en un ``flight log'' absoluto. S\'i mejora la descripci\'on del gesto, deja visible el l\'imite real del algoritmo IMU-only y prepara la base para una Iteraci\'on 2 con sensores auxiliares.
+
+\section{Contexto}
+Las pruebas V3 corresponden a gestos estructurados de barra con el sensor aproximadamente mirando hacia arriba:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{suelo $\rightarrow$ mesa}: desplazamiento vertical de referencia aproximado de \SI{1}{m};
+  \item \textbf{mesa $\rightarrow$ suelo}: desplazamiento vertical de referencia aproximado de \SI{-1}{m};
+  \item la captura empieza al pulsar \emph{grabar} y termina al pulsar \emph{parar}, por lo que incluye tiempo de colocaci\'on antes del gesto y reposo final despu\'es del gesto.
+\end{itemize}
+
+Ese detalle es clave: si todo el JSON se integra como si fuera un movimiento continuo, la trayectoria queda sesgada por la cola quieta y por el ruido integrado en reposo.
+
+\section{Estado previo observado en V3}
+Antes del cambio actual, los V3 ya mostraban una captura sana por radio, pero un cierre deficiente del tramo activo:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{V3-moovia-session-1774637821525.json}: \texttt{missingPackets=0}, \texttt{avgRate\,$\approx$\,1060,8 Hz}, pero el tramo activo terminaba con \(v_z \approx \SI{-1,846}{m/s}\), \(z \approx \SI{-1,674}{m}\), \(|a_{lin}| \approx \SI{0,127}{m/s^2}\) y gyro \(\approx \SI{0,077}{dps}\). El gesto real ya hab\'ia terminado, pero la integraci\'on segu\'ia ``corriendo''.
+  \item \texttt{V3-moovia-session-1774637899200.json}: tambi\'en con \texttt{missingPackets=0} y una forma vertical coherente (``sube un poco antes de bajar''), pero el tramo activo a\'un acababa con \(v_z \approx \SI{-0,634}{m/s}\) y \(z \approx \SI{-0,336}{m}\).
+\end{itemize}
+
+La conclusi\'on t\'ecnica era clara: la radio ya no explicaba la deformaci\'on principal. El error dominante estaba en el cierre tard\'io del movimiento, la velocidad residual no anulada, la sensibilidad del yaw/lateral y la posible fijaci\'on demasiado temprana del eje de barra (\texttt{barAxis}).
+
+\section{Cambios implementados}
+\subsection*{1. Endpoint activo frente a endpoint asentado}
+El an\'alisis compartido en \texttt{sensor-core} ahora distingue entre:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{Active end point}: \'ultimo punto del tramo activo mostrado;
+  \item \textbf{Settled end point}: posici\'on media del reposo final.
+\end{itemize}
+
+Con esto las gr\'aficas y la visualizaci\'on 3D ense\~nan la reconstrucci\'on activa estabilizada, mientras que la posici\'on asentada final se reporta aparte.
+
+\subsection*{2. Recorte de cola quieta y ``velocity kill'' de postprocesado}
+Cuando al final de la sesi\'on aparece una ventana suficientemente larga con baja energ\'ia f\'isica (\(|a_{lin}|\) bajo y gyro bajo), el algoritmo:
+\begin{enumerate}[leftmargin=16pt]
+  \item recorta esa cola del tramo activo;
+  \item fija el motivo de cierre como \texttt{quiet\_tail};
+  \item fuerza la velocidad residual reportada del tramo activo a cero en la reconstrucci\'on estabilizada.
+\end{enumerate}
+
+Esto no modifica el JSON crudo exportado; solo afecta al an\'alisis offline y a la visualizaci\'on.
+
+\subsection*{3. `barAxis' solo con giro real}
+La estimaci\'on del eje de manga ya no se congela durante el reposo inicial. Solo se acumulan muestras de gyro suficientemente energ\'eticas y se reporta una confianza:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{high}: eje dominante consistente;
+  \item \texttt{low}: evidencia insuficiente o poco dominante;
+  \item \texttt{unavailable}: no hay datos suficientes para estimarlo.
+\end{itemize}
+
+Si no hay evidencia suficiente, el sistema degrada a ``sin compensaci\'on de manga'' en vez de inventar un eje.
+
+\subsection*{4. Diagn\'ostico temporal}
+Se a\~nade una m\'etrica diagn\'ostica de tiempo:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{\texttt{effectiveTickUs} de captura}: inferido a partir de \texttt{hwTs16}, alrededor de \SI{1,067}{\micro\second}/tick;
+  \item \textbf{\texttt{effectiveTickUs} del an\'alisis}: mediana del intervalo reconstruido entre muestras, alrededor de \SI{999,5}{\micro\second}, es decir, muy cerca de \SI{1}{ms}.
+\end{itemize}
+
+Esto sugiere que el \(\approx \SI{1060}{Hz}\) observado no equivale necesariamente a una ODR real de \SI{1060}{Hz}; parte de esa cifra viene de la interpolaci\'on temporal y de intervalos sub-milisegundo dentro del pipeline.
+
+\section{Estado actual de V3 tras el cambio}
+La tabla~\ref{tab:v3-current} resume el estado actual de las dos sesiones V3 tras aplicar el nuevo postprocesado.
+
+\begin{table}[h!]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Archivo & Rate [Hz] & missPkt & missSmpl & maxGap [ms] & Activo [s] & Pico lin [m/s\textsuperscript{2}] & Alt. m\'ax [m] & Alt. final [m] & Lat. m\'ax [m] & Lat. final [m] \\
+\midrule
+V3 suelo$\rightarrow$mesa & 1060,80 & 0 & 0 & 53,00 & 1,39 & 19,34 & 0,000 & -0,822 & 0,269 & 0,170 \\
+V3 mesa$\rightarrow$suelo & 1060,34 & 0 & 0 & 68,00 & 1,93 & 14,67 & 0,206 & 0,143 & 0,374 & 0,233 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{M\'etricas principales de captura y movimiento sobre los JSON V3.}
+\label{tab:v3-current}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+Archivo & Idle ini. [s] & Idle fin. [s] & Tail recortada [s] & Fin activo Z [m] & Fin asentado Z [m] & Vel. residual [m/s] \\
+\midrule
+V3 suelo$\rightarrow$mesa & 2,37 & 1,77 & 0,63 & -1,684 & -0,822 & 0,000 \\
+V3 mesa$\rightarrow$suelo & 2,54 & 2,34 & 0,33 & -0,394 & 0,143 & 0,000 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Separaci\'on entre endpoint activo y posici\'on asentada final tras estabilizaci\'on.}
+\end{table}
+
+\textbf{Lectura de los resultados:}
+\begin{itemize}[leftmargin=14pt]
+  \item El criterio de captura queda despejado: \textbf{BLE no domina} porque ambos archivos tienen \texttt{missingPackets = 0}.
+  \item El cierre del tramo activo mejora visualmente: la trayectoria deja de prolongarse artificialmente durante la cola quieta y el residual reportado queda estabilizado a cero.
+  \item La diferencia entre \textbf{fin activo} y \textbf{fin asentado} sigue siendo grande. Eso evidencia que la reconstrucci\'on de trayectoria a\'un arrastra error f\'isico dentro del propio movimiento, aunque la visualizaci\'on ya no perpet\'ua la deriva en reposo.
+  \item El caso \emph{mesa $\rightarrow$ suelo} sigue preservando la forma ``sube un poco antes de bajar'', que era una se\~nal real del gesto y deb\'ia mantenerse.
+\end{itemize}
+
+\section{Por qu\'e el dibujo sale desvirtuado}
+La deformaci\'on actual ya no se explica principalmente por la radio. Las causas m\'as probables son:
+\begin{enumerate}[leftmargin=16pt]
+  \item \textbf{Cierre tard\'io del movimiento}: aunque ya se recorta la cola quieta, el endpoint activo a\'un llega con mucha deriva acumulada.
+  \item \textbf{Integraci\'on con velocidad residual}: el integrador sigue acumulando peque\~nos errores de aceleraci\'on/orientaci\'on y los convierte en un gran desplazamiento ficticio.
+  \item \textbf{Sensibilidad del yaw/lateral}: sin referencia absoluta de heading, la lateral es especialmente sensible cuando el sensor gira o la manga de la barra rota.
+  \item \textbf{Fijaci\'on de `barAxis'}: ahora es m\'as robusta, pero el sistema sigue siendo fr\'agil si el giro \'util no aporta suficiente observabilidad.
+  \item \textbf{Sesgo temporal leve}: el reloj medio por muestra no parece roto, pero la combinaci\'on de \texttt{ts\_raw}, interpolaci\'on y distribuci\'on de \(\Delta t\) puede seguir introduciendo peque\~no sesgo cinem\'atico.
+\end{enumerate}
+
+\section{Hasta d\'onde puede mejorar IMU-only}
+\textbf{Lo que s\'i esperamos mejorar todav\'ia:}
+\begin{itemize}[leftmargin=14pt]
+  \item detecci\'on m\'as limpia del inicio y del fin del gesto;
+  \item conservaci\'on de la forma vertical del movimiento;
+  \item altura m\'axima y altura asentada m\'as coherentes en gestos estructurados;
+  \item lateral final menos contaminada por la cola de reposo;
+  \item mayor consistencia entre gr\'aficas, tablas y visualizaci\'on 3D.
+\end{itemize}
+
+\textbf{Lo que no debemos prometer con esta configuraci\'on:}
+\begin{itemize}[leftmargin=14pt]
+  \item trayectoria 3D absoluta fiable;
+  \item yaw absoluto estable;
+  \item lateral precisa durante giro de manga o cambios de orientaci\'on sostenidos;
+  \item un ``registro de vuelo'' tipo dron solo con esta IMU 6DoF.
+\end{itemize}
+
+En otras palabras: el techo realista de esta fase es una \textbf{buena descripci\'on del gesto}, no una navegaci\'on absoluta.
+
+\section{Lecciones del paper}
+El paper de referencia, \emph{A Study of a GNSS/IMU System for Object Localization and Spatial Position Estimation} (\textit{Sensors} 2025, 25, 6968, doi: \href{https://doi.org/10.3390/s25226968}{10.3390/s25226968}), es valioso como marco metodol\'ogico, pero no como benchmark directo para este proyecto.
+
+Las ideas transferibles m\'as relevantes son:
+\begin{itemize}[leftmargin=14pt]
+  \item separar \textbf{actitud} y \textbf{cinem\'atica} en filtros distintos;
+  \item modelar \textbf{bias} y ruido de sensores de forma expl\'icita;
+  \item ajustar el filtro con \textbf{Allan variance} y par\'ametros estad\'isticos reales de las IMU;
+  \item usar referencias absolutas (GNSS, magnet\'ometro, etc.) para corregir heading y posici\'on.
+\end{itemize}
+
+La diferencia fundamental es de observabilidad:
+\begin{itemize}[leftmargin=14pt]
+  \item el paper combina \textbf{GNSS + IMU 10DoF + magnet\'ometro + dos filtros de Kalman};
+  \item nuestro caso actual es \textbf{IMU-only 6DoF} en un entorno con giro de manga, sin referencia absoluta de yaw ni de posici\'on.
+\end{itemize}
+
+Por eso el paper confirma la direcci\'on t\'ecnica correcta, pero tambi\'en deja claro por qu\'e no podemos exigirle a la fase actual una trayectoria absoluta de calidad comparable.
+
+\section{Siguiente iteraci\'on}
+La Iteraci\'on 2 deber\'ia centrarse en aumentar la observabilidad del sistema. La propuesta t\'ecnica m\'as coherente es:
+\begin{enumerate}[leftmargin=16pt]
+  \item \textbf{magnet\'ometro} bien calibrado para estabilizar yaw;
+  \item posible \textbf{inclin\'ometro/p\'endulo MEMS} para robustecer actitud en escenarios con giro r\'apido;
+  \item o un sensor auxiliar de \textbf{altura/posici\'on} si se quiere acercar el resultado a un ``flight log'';
+  \item desacoplar de forma formal:
+    \begin{itemize}[leftmargin=14pt]
+      \item filtro de actitud;
+      \item filtro cinem\'atico.
+    \end{itemize}
+\end{enumerate}
+
+\section*{Conclusi\'on}
+Los V3 son una buena noticia para el proyecto: demuestran que la captura BLE ya no est\'a rompiendo la sesi\'on. Eso nos permite atacar el problema real con m\'as precisi\'on: la reconstrucci\'on del movimiento con una IMU 6DoF, sin referencias absolutas, tiene un techo f\'isico claro.
+
+La mejora implementada en esta iteraci\'on ---recorte de cola quieta, separaci\'on entre endpoint activo y endpoint asentado, y diagn\'osticos de cierre--- hace el sistema m\'as honesto y m\'as \'util. Describe mejor el gesto y deja visible cu\'ando la trayectoria ya entra en zona de baja confianza. Ese es exactamente el punto correcto para pasar a la siguiente iteraci\'on de arquitectura.
+
+\end{document}

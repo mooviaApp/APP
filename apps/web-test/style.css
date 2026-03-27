@@ -273,6 +273,14 @@ td {
   padding: 24px;
 }
 
+.card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
 .notice-card {
   margin-bottom: 20px;
   padding: 18px 24px;
@@ -290,6 +298,35 @@ td {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+}
+
+.projection-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.projection-btn {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.projection-btn:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.projection-btn.active {
+  background: rgba(29, 240, 159, 0.16);
+  border-color: rgba(29, 240, 159, 0.45);
+  color: var(--secondary);
 }
 
 .mt-20 { margin-top: 20px; }
@@ -311,3 +348,27 @@ td {
 .status-bad  { background: rgba(240, 65, 29, 0.2); color: var(--accent); }
 
 .capture-grid p { margin-bottom: 6px; font-size: 13px; }
+.analysis-list p { margin-bottom: 10px; }
+
+.plotly-container {
+  width: 100%;
+  height: 420px;
+}
+
+@media (max-width: 1200px) {
+  main {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+  }
+
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .card-heading {
+    flex-direction: column;
+  }
+}

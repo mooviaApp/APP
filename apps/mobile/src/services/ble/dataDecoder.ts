@@ -1,10 +1,13 @@
-/**
+﻿/**
  * BLE Data Decoder Utilities
- * 
+ *
  * Functions for decoding BLE notification data from the MOOVIA sensor.
  * Handles int16 little-endian conversion and physical unit conversion.
- * 
- * Updated for firmware v2: 15 samples per packet at 1 kHz ODR
+ *
+ * Firmware-aligned packet format:
+ * - byte 0: type (0x02)
+ * - bytes 1..2: seq16 little-endian
+ * - bytes 3..212: 15 samples x 14 bytes
  */
 
 import { decode as base64Decode, encode as base64Encode } from 'base-64';
@@ -16,32 +19,23 @@ import {
     SENSOR_CONFIG,
 } from './constants';
 
-// Timestamp continuity state (cross‑packet)
+export interface DecodedImuPacket {
+    seq16: number;
+    samples: IMUSample[];
+}
+
 let lastHwTimestamp16: number | null = null;
 let lastAbsTimestampMs: number | null = null;
 
-/**
- * Reset the hardware timestamp continuity state. Called when a new streaming session starts.
- */
 export function resetIMUTimestampContinuity() {
     lastHwTimestamp16 = null;
     lastAbsTimestampMs = null;
 }
 
-/**
- * Compute a 16‑bit wrap‑safe delta (prev → curr).
- */
 function deltaTicks16(prev: number, curr: number) {
     return (curr - prev + 0x10000) & 0xffff;
 }
 
-// ============================================================================
-// Low-level Data Conversion
-// ============================================================================
-
-/**
- * Decode a base64 string to a Uint8Array
- */
 export function decodeBase64ToBytes(base64: string): Uint8Array {
     const binaryString = base64Decode(base64);
     const bytes = new Uint8Array(binaryString.length);
@@ -51,154 +45,86 @@ export function decodeBase64ToBytes(base64: string): Uint8Array {
     return bytes;
 }
 
-/**
- * Read a signed 16-bit integer in little-endian format
- * @param bytes - Byte array
- * @param offset - Starting offset
- * @returns Signed int16 value
- */
+export function encodeBytesToBase64(bytes: Uint8Array): string {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return base64Encode(binary);
+}
+
 export function readInt16LE(bytes: Uint8Array, offset: number): number {
     const low = bytes[offset];
     const high = bytes[offset + 1];
     const value = (high << 8) | low;
-
-    // Convert to signed (two's complement)
     return value > 0x7FFF ? value - 0x10000 : value;
 }
 
-/**
- * Read an unsigned 16-bit integer in little-endian format
- * @param bytes - Byte array
- * @param offset - Starting offset
- * @returns Unsigned uint16 value
- */
 export function readUint16LE(bytes: Uint8Array, offset: number): number {
     const low = bytes[offset];
     const high = bytes[offset + 1];
     return (high << 8) | low;
 }
 
-// ============================================================================
-// Physical Unit Conversion
-// ============================================================================
-
-/**
- * Convert raw gyroscope value to dps (degrees per second)
- * ICM-42688-P Datasheet: ±1000 dps range → 32.8 LSB/dps
- * 
- * @param raw - Raw int16 value from sensor
- * @returns Gyroscope value in dps
- */
 export function rawToGyro(raw: number): number {
-    // ICM-42688-P specific: GYRO_FS_SEL=1 (±1000 dps) → 32.8 LSB/dps
-    const GYRO_LSB_PER_DPS = 32.8;
-    return raw / GYRO_LSB_PER_DPS;
+    return raw / 32.8;
 }
 
-/**
- * Convert raw accelerometer value to g
- * ICM-42688-P Datasheet: ±8g range → 4096 LSB/g
- * 
- * @param raw - Raw int16 value from sensor
- * @returns Accelerometer value in g
- */
 export function rawToAccel(raw: number): number {
-    // ICM-42688-P specific: ACCEL_FS_SEL=1 (±8g) → 4096 LSB/g
-    const ACC_LSB_PER_G = 4096;
-    return raw / ACC_LSB_PER_G;
+    return raw / 4096;
 }
 
-// ============================================================================
-// Message Decoders
-// ============================================================================
-
-/**
- * Decode IMU sample data packet with 15 samples (each includes a hardware timestamp)
- *
- * Packet structure (211 bytes):
- * - Byte 0: Message type (0x02)
- * - Bytes 1-14: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE, hwTs as uint16 LE)
- * - Bytes 15-28: Sample 2
- * - ... (continues for 15 samples total)
- * - Bytes 197-210: Sample 15
- *
- * @param bytes - Raw byte array from BLE notification
- * @returns Array of 15 decoded IMU samples with physical units and timestamps
- */
-export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
-    // Dynamic Packet Size Handling
-    const payloadSize = bytes.length - 1;
-    const BYTES_PER_SAMPLE = 14; // Updated for V2 (includes timestamp)
-
-    // Check payload validity
-    if (payloadSize % BYTES_PER_SAMPLE !== 0) {
-        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (Payload ${payloadSize} not multiple of ${BYTES_PER_SAMPLE})`);
-        return [];
+export function decodeIMUPacket(bytes: Uint8Array): DecodedImuPacket | null {
+    if (bytes.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
+        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (expected ${SENSOR_CONFIG.PACKET_SIZE_BYTES})`);
+        return null;
     }
-
-    const sampleCount = payloadSize / BYTES_PER_SAMPLE;
 
     if (bytes[0] !== MESSAGE_TYPES.SAMPLE) {
         console.warn(`[BLE-ERR] Invalid message type: 0x${bytes[0].toString(16)} (expected 0x02)`);
-        return [];
+        return null;
     }
 
-    // Temporary storage for parsed raw values
-    const parsedRaw: {
+    const seq16 = readUint16LE(bytes, 1);
+    const parsedRaw: Array<{
         ax: number; ay: number; az: number;
         gx: number; gy: number; gz: number;
         hwTs: number;
-    }[] = [];
+    }> = [];
 
-    // 1. Parse Bytes
-    for (let i = 0; i < sampleCount; i++) {
-        const offset = 1 + (i * BYTES_PER_SAMPLE);
-
-        const rawAx = readInt16LE(bytes, offset + 0);
-        const rawAy = readInt16LE(bytes, offset + 2);
-        const rawAz = readInt16LE(bytes, offset + 4);
-        const rawGx = readInt16LE(bytes, offset + 6);
-        const rawGy = readInt16LE(bytes, offset + 8);
-        const rawGz = readInt16LE(bytes, offset + 10);
-        const hwTs = readUint16LE(bytes, offset + 12); // New: Timestamp
-
+    for (let i = 0; i < SENSOR_CONFIG.SAMPLES_PER_PACKET; i++) {
+        const offset = SENSOR_CONFIG.PACKET_HEADER_BYTES + (i * SENSOR_CONFIG.BYTES_PER_SAMPLE);
         parsedRaw.push({
-            ax: rawToAccel(rawAx),
-            ay: rawToAccel(rawAy),
-            az: rawToAccel(rawAz),
-            gx: rawToGyro(rawGx),
-            gy: rawToGyro(rawGy),
-            gz: rawToGyro(rawGz),
-            hwTs
+            ax: rawToAccel(readInt16LE(bytes, offset + 0)),
+            ay: rawToAccel(readInt16LE(bytes, offset + 2)),
+            az: rawToAccel(readInt16LE(bytes, offset + 4)),
+            gx: rawToGyro(readInt16LE(bytes, offset + 6)),
+            gy: rawToGyro(readInt16LE(bytes, offset + 8)),
+            gz: rawToGyro(readInt16LE(bytes, offset + 10)),
+            hwTs: readUint16LE(bytes, offset + 12),
         });
     }
 
-    // 2. Reconstruct Relative Timing using hardware timestamp continuity
-    const samples: IMUSample[] = new Array(sampleCount);
+    const samples: IMUSample[] = new Array(parsedRaw.length);
     const now = Date.now();
 
-    // Determine anchor for the last sample of this packet
     let anchorMs: number;
     if (lastHwTimestamp16 === null || lastAbsTimestampMs === null) {
-        // No previous state – anchor to wall clock
         anchorMs = now;
-        console.log('[Decoder] Timestamp anchor: wall‑clock (continuity reset)');
+        console.log('[Decoder] Timestamp anchor: wall-clock (continuity reset)');
     } else {
-        // Compute delta from previous packet's last hw timestamp to this packet's last hw timestamp
-        const lastRaw = parsedRaw[sampleCount - 1];
+        const lastRaw = parsedRaw[parsedRaw.length - 1];
         const dTicks = deltaTicks16(lastHwTimestamp16, lastRaw.hwTs);
         const dMs = (dTicks * SENSOR_CONFIG.TIMESTAMP_TICK_US) / 1000.0;
-        // Sanity check – if the gap is unexpectedly large, fall back to wall clock
         if (dMs > 1000) {
             anchorMs = now;
-            console.log('[Decoder] Timestamp anchor: wall‑clock (large gap)');
+            console.log('[Decoder] Timestamp anchor: wall-clock (large gap)');
         } else {
             anchorMs = lastAbsTimestampMs + dMs;
         }
     }
 
-    // Populate the last sample using the anchor
-    const lastIdx = sampleCount - 1;
+    const lastIdx = parsedRaw.length - 1;
     const lastRaw = parsedRaw[lastIdx];
     samples[lastIdx] = {
         timestamp: new Date(anchorMs).toISOString(),
@@ -210,14 +136,13 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
         gy: lastRaw.gy,
         gz: lastRaw.gz,
         hwTs16: lastRaw.hwTs,
+        packetSeq16: seq16,
     };
 
-    // Back‑calculate timestamps for preceding samples within the packet
     for (let i = lastIdx - 1; i >= 0; i--) {
         const curr = parsedRaw[i];
         const next = parsedRaw[i + 1];
         const nextTime = samples[i + 1].timestampMs;
-
         const dTicks = deltaTicks16(curr.hwTs, next.hwTs);
         const dMs = (dTicks * SENSOR_CONFIG.TIMESTAMP_TICK_US) / 1000.0;
         const currTime = nextTime - dMs;
@@ -232,26 +157,16 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
             gy: curr.gy,
             gz: curr.gz,
             hwTs16: curr.hwTs,
+            packetSeq16: seq16,
         };
     }
 
-    // Update global continuity state for the next packet
     lastHwTimestamp16 = lastRaw.hwTs;
     lastAbsTimestampMs = anchorMs;
 
-    return samples;
+    return { seq16, samples };
 }
 
-/**
- * Decode log message
- * 
- * Packet structure:
- * - Byte 0: Message type (0x03)
- * - Bytes 1+: ASCII text
- * 
- * @param bytes - Raw byte array from BLE notification
- * @returns Decoded log message
- */
 export function decodeLogMessage(bytes: Uint8Array): LogMessage {
     if (bytes.length < 2) {
         throw new Error(`Invalid log message length: ${bytes.length}`);
@@ -261,7 +176,6 @@ export function decodeLogMessage(bytes: Uint8Array): LogMessage {
         throw new Error(`Invalid message type: 0x${bytes[0].toString(16)} (expected 0x03)`);
     }
 
-    // Extract ASCII text (skip first byte)
     const textBytes = bytes.slice(1);
     const message = String.fromCharCode(...textBytes).trim();
 
@@ -271,16 +185,6 @@ export function decodeLogMessage(bytes: Uint8Array): LogMessage {
     };
 }
 
-/**
- * Decode WHO_AM_I response
- * 
- * Packet structure:
- * - Byte 0: Message type (0x04)
- * - Byte 1: WHO_AM_I register value
- * 
- * @param bytes - Raw byte array from BLE notification
- * @returns Decoded WHO_AM_I response
- */
 export function decodeWHOAMI(bytes: Uint8Array): WHOAMIResponse {
     if (bytes.length < 2) {
         throw new Error(`Invalid WHO_AM_I response length: ${bytes.length}`);
@@ -300,13 +204,7 @@ export function decodeWHOAMI(bytes: Uint8Array): WHOAMIResponse {
     };
 }
 
-/**
- * Decode any BLE notification based on message type
- * 
- * @param base64Data - Base64-encoded data from BLE notification
- * @returns Decoded message object (array of samples for SAMPLE type, single object for others)
- */
-export function decodeNotification(base64Data: string): IMUSample[] | LogMessage | WHOAMIResponse | null {
+export function decodeNotification(base64Data: string): DecodedImuPacket | LogMessage | WHOAMIResponse | null {
     try {
         const bytes = decodeBase64ToBytes(base64Data);
 
@@ -315,20 +213,15 @@ export function decodeNotification(base64Data: string): IMUSample[] | LogMessage
             return null;
         }
 
-        const messageType = bytes[0];
-
-        switch (messageType) {
+        switch (bytes[0]) {
             case MESSAGE_TYPES.SAMPLE:
                 return decodeIMUPacket(bytes);
-
             case MESSAGE_TYPES.LOG:
                 return decodeLogMessage(bytes);
-
             case MESSAGE_TYPES.WHO_AM_I_RESPONSE:
                 return decodeWHOAMI(bytes);
-
             default:
-                console.warn(`[BLE-DEBUG] Unknown message type: 0x${messageType.toString(16)}`);
+                console.warn(`[BLE-DEBUG] Unknown message type: 0x${bytes[0].toString(16)}`);
                 return null;
         }
     } catch (error) {
@@ -337,22 +230,6 @@ export function decodeNotification(base64Data: string): IMUSample[] | LogMessage
     }
 }
 
-// ============================================================================
-// Command Encoding
-// ============================================================================
-
-/**
- * Encode a command byte for sending to the device
- * 
- * @param command - Command code (0x01-0x04)
- * @returns Base64-encoded command
- */
 export function encodeCommand(command: number): string {
-    const bytes = new Uint8Array([command]);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    // Use base-64 polyfill compatible with Hermes/Expo (btoa is not available)
-    return base64Encode(binary);
+    return encodeBytesToBase64(new Uint8Array([command]));
 }

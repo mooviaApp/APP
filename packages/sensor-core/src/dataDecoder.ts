@@ -70,25 +70,31 @@ function deltaTicks16(prev: number, curr: number) {
     return (curr - prev + 0x10000) & 0xffff;
 }
 
+export interface DecodedImuPacket {
+    seq16: number;
+    samples: IMUSample[];
+}
+
 /**
- * Decode IMU sample data packet
- * Returns array of decoded IMU samples with physical units and timestamps
+ * Decode IMU sample data packet.
+ * Firmware format:
+ * - byte 0: message type (0x02)
+ * - bytes 1..2: seq16 little-endian
+ * - bytes 3..212: 15 samples x 14 bytes
  */
-export function decodeIMUPacket(bytes: Uint8Array | number[]): IMUSample[] {
-    const payloadSize = bytes.length - 1;
-    const BYTES_PER_SAMPLE = 14;
-
-    if (payloadSize % BYTES_PER_SAMPLE !== 0) {
+export function decodeIMUPacket(bytes: Uint8Array | number[]): DecodedImuPacket | null {
+    if (bytes.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) {
         console.warn(`[Decoder] Invalid IMU packet length: ${bytes.length}`);
-        return [];
+        return null;
     }
-
-    const sampleCount = payloadSize / BYTES_PER_SAMPLE;
 
     if (bytes[0] !== MESSAGE_TYPES.SAMPLE) {
         console.warn(`[Decoder] Invalid message type: 0x${bytes[0].toString(16)}`);
-        return [];
+        return null;
     }
+
+    const seq16 = readUint16LE(bytes, 1);
+    const sampleCount = SENSOR_CONFIG.SAMPLES_PER_PACKET;
 
     const parsedRaw: {
         ax: number; ay: number; az: number;
@@ -97,7 +103,7 @@ export function decodeIMUPacket(bytes: Uint8Array | number[]): IMUSample[] {
     }[] = [];
 
     for (let i = 0; i < sampleCount; i++) {
-        const offset = 1 + (i * BYTES_PER_SAMPLE);
+        const offset = SENSOR_CONFIG.PACKET_HEADER_BYTES + (i * SENSOR_CONFIG.BYTES_PER_SAMPLE);
         parsedRaw.push({
             ax: rawToAccel(readInt16LE(bytes, offset + 0)),
             ay: rawToAccel(readInt16LE(bytes, offset + 2)),
@@ -129,6 +135,8 @@ export function decodeIMUPacket(bytes: Uint8Array | number[]): IMUSample[] {
         timestampMs: anchorMs,
         ax: lastRaw.ax, ay: lastRaw.ay, az: lastRaw.az,
         gx: lastRaw.gx, gy: lastRaw.gy, gz: lastRaw.gz,
+        hwTs16: lastRaw.hwTs,
+        packetSeq16: seq16,
     };
 
     for (let i = lastIdx - 1; i >= 0; i--) {
@@ -144,11 +152,13 @@ export function decodeIMUPacket(bytes: Uint8Array | number[]): IMUSample[] {
             timestampMs: currTime,
             ax: curr.ax, ay: curr.ay, az: curr.az,
             gx: curr.gx, gy: curr.gy, gz: curr.gz,
+            hwTs16: curr.hwTs,
+            packetSeq16: seq16,
         };
     }
 
     lastHwTimestamp16 = lastRaw.hwTs;
     lastAbsTimestampMs = anchorMs;
 
-    return samples;
+    return { seq16, samples };
 }
