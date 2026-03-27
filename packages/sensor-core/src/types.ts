@@ -5,6 +5,9 @@
  * Platform-agnostic: used by both mobile app and web test tool.
  */
 
+import type { Vec3 } from './Vec3';
+import type { Quaternion } from './QuaternionMath';
+
 // ============================================================================
 // Sensor Configuration
 // ============================================================================
@@ -69,10 +72,60 @@ export interface RawIMUPacket {
 
 export interface TrajectoryRecord {
     timestamp: number;
-    acc_net: { x: number; y: number; z: number };
-    q: { w: number; x: number; y: number; z: number };
-    p_raw: { x: number; y: number; z: number };
-    v_raw: { x: number; y: number; z: number };
+    acc_net: Vec3;
+    q: Quaternion;
+    p_raw: Vec3;
+    v_raw: Vec3;
+    isStationary?: boolean;
+    linAccMag?: number;
+    gyroMagDps?: number;
+    dtMs?: number;
+}
+
+export interface TrajectoryPoint {
+    timestamp: number;
+    position: Vec3;
+    rotation: Quaternion;
+    relativePosition: Vec3;
+}
+
+export interface MovementSegment {
+    startIndex: number;
+    endIndex: number;
+    startTimeMs: number;
+    endTimeMs: number;
+    initialIdleMs: number;
+    finalIdleMs: number;
+    confidence: 'segmented' | 'fallback' | 'insufficient';
+}
+
+export interface SessionMovementMetrics {
+    peakLinearAcc: number;
+    meanPropulsiveVelocity: number;
+    maxHeight: number;
+    finalHeight: number;
+    maxLateral: number;
+    finalLateral: number;
+}
+
+export interface SessionAnalysisSummary {
+    movementSegment: MovementSegment | null;
+    movementMetrics: SessionMovementMetrics;
+    activePath: TrajectoryPoint[];
+    fullPath: TrajectoryPoint[];
+}
+
+export interface CaptureHealthStats {
+    avgRateHz: number;
+    medianDtMs: number;
+    maxDtMs: number;
+    gapsPct: number;
+    maxGapMs: number;
+    totalPackets: number;
+    invalidPackets: number;
+    estimatedMissingSamples: number;
+    droppedPackets: number;
+    durationMs: number;
 }
 
 export interface RawPacketRecord {

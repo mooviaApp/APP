@@ -193,6 +193,15 @@ main {
   color: var(--text-muted);
 }
 
+.text-muted {
+  color: var(--text-muted);
+}
+
+.notice {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* Tabs */
 .tabs-nav {
   display: flex;
@@ -262,6 +271,11 @@ td {
 /* Plotter */
 .plotter-card {
   padding: 24px;
+}
+
+.notice-card {
+  margin-bottom: 20px;
+  padding: 18px 24px;
 }
 
 .canvas-container {

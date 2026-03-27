@@ -23,6 +23,7 @@ import { SensorDataCard } from '../components/SensorDataCard';
 import { trajectoryService, TrajectoryPoint } from '../services/math/TrajectoryService';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import type { CaptureHealthStats, SessionAnalysisSummary } from '@moovia/sensor-core';
 
 const COLORS = {
     primary: '#501FF0',
@@ -42,6 +43,7 @@ export function BLEDeviceScreen() {
     const [meanPropulsiveVelocity, setMeanPropulsiveVelocity] = useState<number | null>(null);
     const [maxHeight, setMaxHeight] = useState<number | null>(null);
     const [maxLateral, setMaxLateral] = useState<number | null>(null);
+    const [sessionAnalysis, setSessionAnalysis] = useState<SessionAnalysisSummary | null>(null);
 
     const {
         isScanning,
@@ -65,7 +67,7 @@ export function BLEDeviceScreen() {
         getRawSession,
         getCaptureStats,
     } = useBLE();
-    const [captureStats, setCaptureStats] = useState<any | null>(null);
+    const [captureStats, setCaptureStats] = useState<CaptureHealthStats | null>(null);
 
     const handleStartStreaming = async () => {
         setFinalPath([]); // Clear previous graph
@@ -73,6 +75,7 @@ export function BLEDeviceScreen() {
         setMeanPropulsiveVelocity(null);
         setMaxHeight(null);
         setMaxLateral(null);
+        setSessionAnalysis(null);
         await startStreaming();
     };
 
@@ -82,12 +85,13 @@ export function BLEDeviceScreen() {
             const points = trajectoryService.getPath().length;
             console.log('[UI] Stream stopped. Updating graph path with ' + points + ' points');
             setFinalPath([...trajectoryService.getPath()]);
+            const analysis = trajectoryService.getSessionAnalysis();
 
             // Obtener mÃ©tricas despuÃ©s del post-processing
-            const peakAcc = trajectoryService.getPeakLinearAcceleration();
-            const vmp = trajectoryService.getMeanPropulsiveVelocity();
-            const height = trajectoryService.getMaxHeight();
-            const lateral = trajectoryService.getMaxLateral();
+            const peakAcc = analysis.movementMetrics.peakLinearAcc;
+            const vmp = analysis.movementMetrics.meanPropulsiveVelocity;
+            const height = analysis.movementMetrics.maxHeight;
+            const lateral = analysis.movementMetrics.maxLateral;
             const capStats = getCaptureStats();
 
             setPeakAcceleration(peakAcc);
@@ -95,6 +99,7 @@ export function BLEDeviceScreen() {
             setMaxHeight(height);
             setMaxLateral(lateral);
             setCaptureStats(capStats);
+            setSessionAnalysis(analysis);
 
             console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/sÂ², VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
 
@@ -385,6 +390,35 @@ export function BLEDeviceScreen() {
                                 </View>
                                 <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>droppedPackets</Text><Text style={styles.captureValue}>{captureStats.droppedPackets}</Text>
+                                </View>
+                            </View>
+                        )}
+
+                        {sessionAnalysis?.movementSegment && (
+                            <View style={styles.captureCard}>
+                                <Text style={styles.sectionTitle}>Movement Window</Text>
+                                <Text style={styles.captureHint}>
+                                    La captura completa incluye colocacion y reposo; estas metricas usan solo el tramo activo.
+                                </Text>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>idle inicial</Text>
+                                    <Text style={styles.captureValue}>{(sessionAnalysis.movementSegment.initialIdleMs / 1000).toFixed(2)} s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>movimiento</Text>
+                                    <Text style={styles.captureValue}>{((sessionAnalysis.movementSegment.endTimeMs - sessionAnalysis.movementSegment.startTimeMs) / 1000).toFixed(2)} s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>idle final</Text>
+                                    <Text style={styles.captureValue}>{(sessionAnalysis.movementSegment.finalIdleMs / 1000).toFixed(2)} s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>confidence</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementSegment.confidence}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>altura final</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.finalHeight.toFixed(2)} m</Text>
                                 </View>
                             </View>
                         )}
@@ -696,6 +730,12 @@ const styles = StyleSheet.create({
         marginTop: 12,
         borderWidth: 1,
         borderColor: '#333',
+    },
+    captureHint: {
+        color: COLORS.textMuted,
+        fontSize: 12,
+        lineHeight: 18,
+        marginBottom: 10,
     },
     captureRow: {
         flexDirection: 'row',

@@ -1,7 +1,11 @@
 import '../style.css';
 import { Chart, registerables } from 'chart.js';
 import { 
+    analyzeCaptureHealth,
+    CaptureHealthStats,
     IMUSample, 
+    RawPacketRecord,
+    SessionAnalysisSummary,
     TrajectoryService, 
     SENSOR_CONFIG 
 } from '@moovia/sensor-core';
@@ -10,22 +14,9 @@ Chart.register(...registerables);
 
 // UI State
 let samples: IMUSample[] = [];
-let rawPackets: any[] = [];
+let rawPackets: RawPacketRecord[] = [];
 let charts: { [key: string]: Chart } = {};
 const trajectoryService = new TrajectoryService();
-const GAP_THRESHOLD_MS = 4;
-
-interface CaptureStats {
-    avgRateHz: number;
-    medianDtMs: number;
-    maxDtMs: number;
-    gapsPct: number;
-    maxGapMs: number;
-    totalPackets: number;
-    invalidPackets: number;
-    estimatedMissingSamples: number;
-    droppedPackets: number;
-}
 
 // DOM Elements
 const fileInput = document.getElementById('file-upload') as HTMLInputElement;
@@ -35,6 +26,9 @@ const heightPeakEl = document.getElementById('height-peak') as HTMLElement;
 const lateralMaxEl = document.getElementById('lateral-max') as HTMLElement;
 const lateralFinalEl = document.getElementById('lateral-final') as HTMLElement;
 const sessionMetaEl = document.getElementById('session-meta') as HTMLElement;
+const segmentMetaEl = document.getElementById('segment-meta') as HTMLElement;
+const segmentNoteEl = document.getElementById('segment-note') as HTMLElement;
+const processedNoteEl = document.getElementById('processed-note') as HTMLElement;
 const rawTableBody = document.querySelector('#raw-table tbody') as HTMLElement;
 const packetTableBody = document.querySelector('#packet-table tbody') as HTMLElement;
 const captureStatusEl = document.getElementById('capture-status') as HTMLElement;
@@ -108,6 +102,9 @@ function setupFileUpload() {
 function processRawTrajectory(rawData: any[]) {
     // This is for when we export the rawDataBuffer from TrajectoryService directly
     trajectoryService.reset();
+    segmentMetaEl.innerHTML = `<p><strong>Status:</strong> Legacy export</p><p><strong>Segmentación:</strong> no disponible en este JSON</p>`;
+    segmentNoteEl.innerText = 'Este archivo ya trae rawData procesado; no contiene la sesión raw completa para segmentar idle/move/idle.';
+    processedNoteEl.innerText = 'Modo legacy: se muestran los datos procesados disponibles en el archivo.';
     
     // Inject existing data points into charts
     updateChartsFromRaw(rawData);
@@ -125,8 +122,11 @@ function updateMetricsFromRaw(rawData: any[]) {
         if (d.p_raw.z > maxZ) maxZ = d.p_raw.z;
     });
 
+    vmpEl.innerText = '0.00';
     accPeakEl.innerText = maxAcc.toFixed(2);
     heightPeakEl.innerText = maxZ.toFixed(2);
+    lateralMaxEl.innerText = '0.00';
+    lateralFinalEl.innerText = '0.00';
 }
 
 function updateChartsFromRaw(rawData: any[]) {
@@ -167,42 +167,61 @@ function processData() {
 
     // Run post-processing
     trajectoryService.applyPostProcessingCorrections();
+    const analysis = trajectoryService.getSessionAnalysis();
+    const captureStats = analyzeCaptureHealth(samples, rawPackets, SENSOR_CONFIG.ODR_HZ);
 
     // Update UI
-    updateMetrics();
+    updateMetrics(analysis);
     updateTable();
     updatePacketTable();
-    updateCharts();
-    updateMeta();
-    updateCaptureHealth();
+    updateCharts(analysis);
+    updateMeta(analysis, captureStats);
+    updateCaptureHealth(captureStats);
 }
 
-function updateMetrics() {
-    const vmp = trajectoryService.getMeanPropulsiveVelocity();
-    const peakAcc = trajectoryService.getPeakLinearAcceleration();
-    const maxHeight = trajectoryService.getMaxHeight();
-    const maxLateral = trajectoryService.getMaxLateral();
-    const finalLateral = trajectoryService.getFinalLateral();
-
-    vmpEl.innerText = vmp.toFixed(2);
-    accPeakEl.innerText = peakAcc.toFixed(2);
-    heightPeakEl.innerText = maxHeight.toFixed(2);
-    lateralMaxEl.innerText = maxLateral.toFixed(2);
-    lateralFinalEl.innerText = finalLateral.toFixed(2);
+function updateMetrics(analysis: SessionAnalysisSummary) {
+    const metrics = analysis.movementMetrics;
+    vmpEl.innerText = metrics.meanPropulsiveVelocity.toFixed(2);
+    accPeakEl.innerText = metrics.peakLinearAcc.toFixed(2);
+    heightPeakEl.innerText = metrics.maxHeight.toFixed(2);
+    lateralMaxEl.innerText = metrics.maxLateral.toFixed(2);
+    lateralFinalEl.innerText = metrics.finalLateral.toFixed(2);
 }
 
-function updateMeta() {
+function updateMeta(analysis: SessionAnalysisSummary, captureStats: CaptureHealthStats) {
     if (samples.length === 0) return;
-    
-    const duration = (samples[samples.length - 1].timestampMs - samples[0].timestampMs) / 1000;
-    const rate = samples.length / duration;
+
+    const duration = captureStats.durationMs / 1000;
+    const rate = captureStats.avgRateHz;
+    const movementSegment = analysis.movementSegment;
+    const activeDuration = movementSegment
+        ? Math.max(0, movementSegment.endTimeMs - movementSegment.startTimeMs) / 1000
+        : 0;
 
     sessionMetaEl.innerHTML = `
         <p><strong>Samples:</strong> ${samples.length}</p>
         <p><strong>Duration:</strong> ${duration.toFixed(2)}s</p>
         <p><strong>Avg Rate:</strong> ${rate.toFixed(0)} Hz</p>
+        <p><strong>Active:</strong> ${activeDuration.toFixed(2)}s</p>
         <p><strong>ODR Config:</strong> ${SENSOR_CONFIG.ODR_HZ} Hz</p>
     `;
+
+    if (!movementSegment) {
+        segmentMetaEl.innerHTML = `<p><strong>Status:</strong> No active segment detected</p>`;
+        segmentNoteEl.innerText = 'La captura completa incluye colocación y reposo; no se detectó un tramo activo fiable.';
+        processedNoteEl.innerText = 'La captura completa incluye colocación/reposo; las gráficas están en modo fallback.';
+        return;
+    }
+
+    segmentMetaEl.innerHTML = `
+        <p><strong>Idle inicial:</strong> ${(movementSegment.initialIdleMs / 1000).toFixed(2)}s</p>
+        <p><strong>Movimiento:</strong> ${activeDuration.toFixed(2)}s</p>
+        <p><strong>Idle final:</strong> ${(movementSegment.finalIdleMs / 1000).toFixed(2)}s</p>
+        <p><strong>Confidence:</strong> ${movementSegment.confidence}</p>
+        <p><strong>Final Z:</strong> ${analysis.movementMetrics.finalHeight.toFixed(2)} m</p>
+    `;
+    segmentNoteEl.innerText = 'La captura completa incluye colocación y reposo; las métricas se calculan sobre el tramo activo detectado.';
+    processedNoteEl.innerText = `Tramo activo: ${(movementSegment.startTimeMs - samples[0].timestampMs).toFixed(0)}-${(movementSegment.endTimeMs - samples[0].timestampMs).toFixed(0)} ms dentro de la captura completa.`;
 }
 
 function updateTable() {
@@ -233,9 +252,9 @@ function updatePacketTable() {
     }
 
     const rows = [];
-    let prev: any = null;
+    let prev: RawPacketRecord | null = null;
     const displayPackets = rawPackets.slice(0, 50);
-    displayPackets.forEach((p: any) => {
+    displayPackets.forEach((p) => {
         const gap = prev ? (p.receivedAt - prev.receivedAt) : 0;
         rows.push(`<tr>
             <td>${p.index}</td>
@@ -308,9 +327,9 @@ function setupCharts() {
     });
 }
 
-function updateCharts() {
-    const rawData = trajectoryService.getRawData(); // contains vel_raw, etc
-    const path = trajectoryService.getPath();      // contains relativePosition
+function updateCharts(analysis: SessionAnalysisSummary) {
+    const rawData = trajectoryService.getActiveRawData();
+    const path = analysis.activePath.length > 0 ? analysis.activePath : analysis.fullPath;
 
     // Accel Chart
     charts.accel.data.labels = rawData.map((_, i) => i);
@@ -333,8 +352,7 @@ function updateCharts() {
     charts.path2d.update();
 }
 
-function updateCaptureHealth() {
-    const stats = computeCaptureStats(samples, rawPackets, SENSOR_CONFIG.ODR_HZ);
+function updateCaptureHealth(stats: CaptureHealthStats) {
     const status = stats.gapsPct < 1 && stats.maxGapMs < 8 ? 'status-good'
         : stats.gapsPct < 5 && stats.maxGapMs < 20 ? 'status-warn'
         : 'status-bad';
@@ -350,67 +368,6 @@ function updateCaptureHealth() {
     captureMetricsEl.invalid.innerText = stats.invalidPackets.toString();
     captureMetricsEl.missing.innerText = stats.estimatedMissingSamples.toFixed(0);
     captureMetricsEl.dropped.innerText = stats.droppedPackets.toString();
-}
-
-function computeCaptureStats(s: IMUSample[], packets: any[], odrHz: number): CaptureStats {
-    if (!s || s.length < 2) {
-        return {
-            avgRateHz: 0, medianDtMs: 0, maxDtMs: 0, gapsPct: 0, maxGapMs: 0,
-            totalPackets: packets?.length || 0, invalidPackets: 0,
-            estimatedMissingSamples: 0, droppedPackets: 0
-        };
-    }
-
-    const sorted = [...s].sort((a, b) => a.timestampMs - b.timestampMs);
-    const dts = [];
-    for (let i = 0; i < sorted.length - 1; i++) {
-        dts.push(sorted[i + 1].timestampMs - sorted[i].timestampMs);
-    }
-    const durationMs = sorted[sorted.length - 1].timestampMs - sorted[0].timestampMs;
-    const avgRateHz = durationMs > 0 ? sorted.length / (durationMs / 1000) : 0;
-    const medianDtMs = median(dts);
-    const maxDtMs = Math.max(...dts);
-    const gaps = dts.filter(dt => dt > GAP_THRESHOLD_MS);
-    const gapsPct = dts.length > 0 ? (gaps.length / dts.length) * 100 : 0;
-    const thresholdPacketMs = GAP_THRESHOLD_MS * 5;
-    let maxGapMs = 0;
-    let droppedPackets = 0;
-    let invalidPackets = 0;
-    if (packets && packets.length > 0) {
-        let prev = packets[0];
-        maxGapMs = 0;
-        packets.forEach((p: any, idx: number) => {
-            if (p.length && p.length !== SENSOR_CONFIG.PACKET_SIZE_BYTES) invalidPackets++;
-            if (p.sampleCount === 0) droppedPackets++;
-            if (idx > 0) {
-                const gap = p.receivedAt - prev.receivedAt;
-                if (gap > maxGapMs) maxGapMs = gap;
-                prev = p;
-            }
-        });
-    }
-
-    const expectedSamples = durationMs > 0 ? Math.round((durationMs / 1000) * odrHz) : 0;
-    const estimatedMissingSamples = Math.max(0, expectedSamples - sorted.length);
-
-    return {
-        avgRateHz,
-        medianDtMs,
-        maxDtMs,
-        gapsPct,
-        maxGapMs: Math.max(maxGapMs, maxDtMs),
-        totalPackets: packets?.length || 0,
-        invalidPackets,
-        estimatedMissingSamples,
-        droppedPackets
-    };
-}
-
-function median(arr: number[]): number {
-    if (arr.length === 0) return 0;
-    const sorted = [...arr].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
 init();

@@ -1,0 +1,124 @@
+﻿\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\sisetup{output-decimal-marker={,}}
+
+\title{An\'alisis V2 de captura IMU y segmentaci\'on idle/move/idle}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Resumen ejecutivo}
+La versi\'on V2 de la captura BLE mejora claramente la tasa efectiva de muestreo frente a la iteraci\'on anterior, pero el principal limitante ya no es solo la radio. El an\'alisis de los JSON crudos muestra dos hechos simult\'aneos: (1) siguen existiendo huecos y muestras faltantes, y (2) la deriva de la trayectoria reconstruida se concentra en el postprocesado, especialmente cuando no se separa expl\'icitamente el tiempo de colocaci\'on/reposo del movimiento real.
+
+Por ese motivo se implement\'o un postprocesado segmentado que divide la sesi\'on completa en tres fases: reposo inicial, movimiento activo y reposo final. A partir de ahora la salud de captura se calcula sobre toda la sesi\'on, mientras que la trayectoria, la altura, la VMP y la desviaci\'on lateral se calculan solo sobre el tramo activo, usando adem\'as la referencia estable del reposo final para la altura y lateral asentadas.
+
+\section{Protocolo real de prueba}
+Las pruebas V2 analizadas corresponden a movimientos verticales simples con tiempo muerto antes y despu\'es del gesto:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{ABAJO--ARRIBA}: desde el suelo hasta una mesa situada aproximadamente a \SI{1}{m}.
+  \item \textbf{ARRIBA--ABAJO}: desde la mesa hasta el suelo.
+  \item El JSON se empieza a registrar cuando se pulsa \emph{grabar} y se detiene al pulsar \emph{parar}, por lo que incluye tiempo para colocar el sensor y tiempo de reposo final.
+\end{itemize}
+
+Este detalle es clave: la captura completa no coincide exactamente con el inicio y fin del movimiento, de modo que un pipeline que integre todo el registro como si fuera un gesto continuo introduce sesgo en las m\'etricas y en la trayectoria.
+
+\section{Calidad de captura V2}
+La tabla~\ref{tab:capture} resume la salud de captura de los tres JSON V2 reprocesados con la l\'ogica actual.
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabularx}{\textwidth}{lrrrrrr}
+\toprule
+Archivo & Rate [Hz] & Dur. [s] & maxDt [ms] & gaps [\%] & missing & packets \\
+\midrule
+V2 ABAJO--ARRIBA & 908,64 & 10,94 & 55,10 & 0,25 & 1000 & 663 \\
+V2 ARRIBA--ABAJO & 875,52 & 12,42 & 55,09 & 0,32 & 1546 & 725 \\
+V2 CURVA PRON. & 881,05 & 12,36 & 55,09 & 0,31 & 1470 & 726 \\
+\bottomrule
+\end{tabularx}
+\caption{M\'etricas de salud de captura calculadas sobre la sesi\'on completa.}
+\label{tab:capture}
+\end{table}
+
+\textbf{Lectura t\'ecnica:}
+\begin{itemize}[leftmargin=14pt]
+  \item La V2 ya no cae a \SI{483}{Hz}; ahora se mueve en el rango de \SIrange{875}{909}{Hz}, lo que confirma que la negociaci\'on de MTU y la ruta BLE mejoraron.
+  \item Aun as\'i siguen faltando entre 1000 y 1546 muestras respecto al objetivo de \SI{1}{kHz} en sesiones de \SIrange{10,9}{12,4}{s}.
+  \item Los \(\Delta t\) de muestra son buenos la mayor parte del tiempo, pero siguen apareciendo huecos puntuales de \(\approx\) \SI{55}{ms}. En el reloj de recepci\'on de paquetes del m\'ovil se observan huecos mayores (\SIrange{254}{343}{ms}), que deben interpretarse con cautela porque reflejan jitter del central y no solo del perif\'erico.
+\end{itemize}
+
+\section{Segmentaci\'on implementada}
+En el postprocesado compartido se a\~naden diagn\'osticos por muestra (estado estacionario, magnitud de aceleraci\'on lineal, magnitud de giro y \(\Delta t\)) y se detectan ventanas estacionarias continuas de al menos \SI{0,40}{s}. A partir de ah\'i se define:
+\begin{enumerate}[leftmargin=16pt]
+  \item \textbf{Reposo inicial}: primer tramo estacionario continuo v\'alido.
+  \item \textbf{Inicio de movimiento}: primer instante, despu\'es del reposo inicial, con movimiento sostenido durante \SI{80}{ms} seg\'un \(|a_{lin}| > \SI{0,35}{m/s^2}\) o \(|v_z| > \SI{0,05}{m/s}\).
+  \item \textbf{Reposo final}: \`ultimo tramo estacionario continuo v\'alido despu\'es del movimiento.
+  \item \textbf{Fin de movimiento}: instante inmediatamente anterior al reposo final.
+\end{enumerate}
+
+El baseline espacial del tramo activo se calcula con la media de posici\'on de los \SI{100}{ms} finales del reposo inicial. La altura final y la lateral final se leen de la posici\'on media del reposo final, no del \`ultimo sample en movimiento, lo que reduce el ruido en la posici\'on asentada.
+
+\section{Resultados tras aplicar la segmentaci\'on}
+\begin{table}[h!]
+\centering
+\small
+\begin{tabularx}{\textwidth}{lrrrrrr}
+\toprule
+Archivo & Idle ini. [s] & Activo [s] & Idle fin. [s] & Alt. m\'ax [m] & Alt. final [m] & Lat. m\'ax/final [m] \\
+\midrule
+V2 ABAJO--ARRIBA & 4,55 & 3,24 & 2,28 & 0,474 & 0,464 & 0,518 / 0,075 \\
+V2 ARRIBA--ABAJO & 3,66 & 2,40 & 4,58 & 0,003 & -0,331 & 0,185 / 0,092 \\
+V2 CURVA PRON. & 3,99 & 2,79 & 4,78 & 0,391 & 0,355 & 1,407 / 0,173 \\
+\bottomrule
+\end{tabularx}
+\caption{M\'etricas calculadas sobre el tramo activo detectado; altura/lateral final asentadas usando el reposo final.}
+\end{table}
+
+\textbf{Conclusiones por caso:}
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{V2 ABAJO--ARRIBA}: el signo y la posici\'on final quedan coherentes (subida y asentamiento positivo), pero la altura sigue comprimida frente al desplazamiento f\'isico de \(\approx\) \SI{1}{m}. La lateral final cae a \SI{0,075}{m}, mejorando mucho respecto al valor instant\'aneo del final del gesto.
+  \item \textbf{V2 ARRIBA--ABAJO}: el signo negativo es coherente con bajar desde la mesa al suelo. Sin embargo, la magnitud tambi\'en queda comprimida (\SI{-0,331}{m} frente a \(\approx\) \SI{-1}{m}).
+  \item \textbf{V2 ABAJO--ARRIBA con curva pronunciada}: la posici\'on final asentada vuelve a ser razonable en signo (\SI{0,355}{m}), pero la lateral m\'axima sigue siendo muy alta (\SI{1,407}{m}) durante el tramo activo.
+\end{itemize}
+
+\section{Qu\'e nos dice esto sobre el sistema}
+El hallazgo importante es que, en el caso de curva pronunciada, la desviaci\'on lateral grande no coincide con un colapso local de la captura. El comportamiento observado es m\'as consistente con deriva del estimador y fuga del frame de orientaci\'on durante el tramo activo que con una p\'erdida masiva de paquetes en ese instante concreto.
+
+Por tanto, el cambio de enfoque es correcto:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{Salud de captura} y \textbf{trayectoria} deben analizarse por separado.
+  \item La captura V2 ya es suficientemente buena para iterar sobre el postprocesado compartido.
+  \item La siguiente mejora debe centrarse en reducir la compresi\'on vertical y la deriva lateral durante el movimiento, no solo en aumentar el throughput BLE.
+\end{itemize}
+
+\section{Decisi\'on t\'ecnica adoptada}
+Se adopta como criterio del proyecto que:
+\begin{enumerate}[leftmargin=16pt]
+  \item \textbf{Capture Health} se calcula sobre toda la sesi\'on exportada.
+  \item Las m\'etricas de levantamiento y las gr\'aficas \emph{Processed} usan solo el tramo activo detectado.
+  \item Los tiempos muertos antes y despu\'es del movimiento se tratan como una ventaja para fijar bias, baseline y posici\'on asentada.
+\end{enumerate}
+
+\section*{Pr\'oximo paso recomendado}
+Con esta base, la siguiente iteraci\'on debe atacar dos frentes concretos:
+\begin{itemize}[leftmargin=14pt]
+  \item reducir la compresi\'on de altura (actualmente \(\approx\) \SIrange{0,33}{0,46}{m} para un desplazamiento f\'isico de \(\approx\) \SI{1}{m}),
+  \item y reducir la lateral m\'axima espuria durante el tramo activo en el caso de giro/desviaci\'on pronunciada.
+\end{itemize}
+
+Eso ya pertenece m\'as a la correcci\'on del estimador (frame, drift, cierre de trayectoria y uso del reposo final) que a la transmisi\'on BLE pura.
+
+\end{document}

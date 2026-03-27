@@ -84,6 +84,16 @@
             </div>
           </div>
 
+          <div class="card info-card">
+            <h3>Movement Window</h3>
+            <p id="segment-note" class="text-muted notice">
+              La captura completa incluye colocación y reposo; las métricas se calculan sobre el tramo activo.
+            </p>
+            <div id="segment-meta" class="meta-list">
+              <p>No segment available</p>
+            </div>
+          </div>
+
           <div class="tabs-nav">
             <button class="tab-btn active" data-tab="raw">🔬 Raw</button>
             <button class="tab-btn" data-tab="processed">📊 Processed</button>
@@ -137,6 +147,11 @@
           </div>
 
           <div id="tab-processed" class="tab-pane">
+            <div class="card plotter-card notice-card">
+              <p id="processed-note" class="text-muted notice">
+                La captura completa incluye colocación/reposo; las gráficas y métricas usan el tramo activo detectado.
+              </p>
+            </div>
             <div class="grid-2">
               <div class="card plotter-card">
                 <h3>Linear Acceleration (Gravity Removed)</h3>

@@ -11,6 +11,7 @@ import { Device } from 'react-native-ble-plx';
 import { getBLEService, BLEEvent } from '../services/ble/BLEService';
 import { IMUSample, LogMessage, WHOAMIResponse, SENSOR_CONFIG, RawSessionExport } from '../services/ble/constants';
 import { trajectoryService } from '../services/math/TrajectoryService';
+import type { CaptureHealthStats } from '@moovia/sensor-core';
 
 // ============================================================================
 // Types
@@ -39,7 +40,7 @@ export interface UseBLEResult {
     calibrateSensor: () => Promise<void>;
     clearError: () => void;
     getRawSession: () => RawSessionExport;
-    getCaptureStats: () => any;
+    getCaptureStats: () => CaptureHealthStats;
 }
 
 // ============================================================================

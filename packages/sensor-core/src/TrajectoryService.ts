@@ -32,16 +32,16 @@
  *    acceleration, velocity, position and stationary state.
  */
 
-import { IMUSample } from './types';
+import {
+    IMUSample,
+    MovementSegment,
+    SessionAnalysisSummary,
+    SessionMovementMetrics,
+    TrajectoryPoint,
+    TrajectoryRecord,
+} from './types';
 import { Vec3, Vec3Math } from './Vec3';
 import { Quaternion, QuatMath } from './QuaternionMath';
-
-export interface TrajectoryPoint {
-    timestamp: number;
-    position: Vec3;
-    rotation: Quaternion;
-    relativePosition: Vec3;
-}
 
 /**
  * Simple 3‑state Kalman filter for a single axis: position (p),
@@ -273,11 +273,14 @@ export class TrajectoryService {
     // Logging counter to throttle console output
     private logCounter: number = 0;
     // Raw data buffer for offline post‑processing
-    private rawDataBuffer: Array<any> = [];
+    private rawDataBuffer: TrajectoryRecord[] = [];
     // Last timestamp processed (ms)
     private lastTimestamp: number = 0;
     // Path of computed points for UI
     private path: TrajectoryPoint[] = [];
+    private fullPath: TrajectoryPoint[] = [];
+    private activeRawData: TrajectoryRecord[] = [];
+    private sessionAnalysis: SessionAnalysisSummary | null = null;
     // Last emitted point (for hold cases)
     private lastPoint: TrajectoryPoint | null = null;
     // Calibration state and buffer
@@ -300,6 +303,10 @@ export class TrajectoryService {
     // Rep state machine
     private repState: 'IDLE' | 'MOVING' | 'APEX' | 'RETURN' = 'IDLE';
     private maxLateral: number = 0;
+    private readonly MIN_IDLE_SECONDS = 0.4;
+    private readonly MIN_MOVEMENT_SECONDS = 0.08;
+    private readonly MOVEMENT_LIN_ACC_THRESHOLD = 0.35;
+    private readonly MOVEMENT_VZ_THRESHOLD = 0.05;
 
     constructor(expectedHz: number = 1000) {
         this.setExpectedHz(expectedHz);
@@ -342,6 +349,9 @@ export class TrajectoryService {
         this.isOrientationInitialized = false;
         this.lastTimestamp = 0;
         this.path = [];
+        this.fullPath = [];
+        this.activeRawData = [];
+        this.sessionAnalysis = null;
         this.lastPoint = null;
         this.accelBuffer = [];
         this.gyroBuffer = [];
@@ -372,6 +382,9 @@ export class TrajectoryService {
         this.p = Vec3Math.zero();
         this.v = Vec3Math.zero();
         this.path = [];
+        this.fullPath = [];
+        this.activeRawData = [];
+        this.sessionAnalysis = null;
         this.lastPoint = null;
         this.baselineP = Vec3Math.zero();
         this.kX.reset();
@@ -635,17 +648,27 @@ export class TrajectoryService {
         const lateral = Math.sqrt(relP.x * relP.x + relP.y * relP.y);
         if (lateral > this.maxLateral) this.maxLateral = lateral;
 
-        // Record raw data for offline analysis
-        this.rawDataBuffer.push({ timestamp: t, acc_net, q: { ...this.q }, p_raw: { ...this.p }, v_raw: { ...this.v } });
+        // Record raw data for offline analysis and segmentation diagnostics
+        const linAccMag = Math.sqrt(acc_net.x ** 2 + acc_net.y ** 2 + acc_net.z ** 2);
+        this.rawDataBuffer.push({
+            timestamp: t,
+            acc_net,
+            q: { ...this.q },
+            p_raw: { ...this.p },
+            v_raw: { ...this.v },
+            isStationary: isStat,
+            linAccMag,
+            gyroMagDps: w_mag * (180 / Math.PI),
+            dtMs: dt * 1000,
+        });
 
         // Throttled logging: every ~50 samples (~20 Hz at 1000 Hz ODR)
         this.logCounter++;
         if (this.logCounter % 50 === 0) {
             const aMag = Math.sqrt(a_world.x ** 2 + a_world.y ** 2 + a_world.z ** 2);
-            const accLinMag = Math.sqrt(acc_net.x ** 2 + acc_net.y ** 2 + acc_net.z ** 2);
             const gEst = Math.sqrt(this.gravity_estimate.x ** 2 + this.gravity_estimate.y ** 2 + this.gravity_estimate.z ** 2);
             console.log(
-                `[Hybrid] Stat:${isStat} dt:${dt.toFixed(4)} |a|:${aMag.toFixed(2)} |gEst|:${gEst.toFixed(2)} |aLin|:${accLinMag.toFixed(3)} v:(${this.v.x.toFixed(3)},${this.v.y.toFixed(3)},${this.v.z.toFixed(3)}) p:(${this.p.x.toFixed(3)},${this.p.y.toFixed(3)},${this.p.z.toFixed(3)})`);
+                `[Hybrid] Stat:${isStat} dt:${dt.toFixed(4)} |a|:${aMag.toFixed(2)} |gEst|:${gEst.toFixed(2)} |aLin|:${linAccMag.toFixed(3)} v:(${this.v.x.toFixed(3)},${this.v.y.toFixed(3)},${this.v.z.toFixed(3)}) p:(${this.p.x.toFixed(3)},${this.p.y.toFixed(3)},${this.p.z.toFixed(3)})`);
             // Optional: log stationary metrics to debug detection
             if (metrics.meanA !== undefined) {
                 console.log(
@@ -829,20 +852,311 @@ export class TrajectoryService {
         };
     }
 
-    /** Returns the recorded path of trajectory points. */
+    private getEmptyMetrics(): SessionMovementMetrics {
+        return {
+            peakLinearAcc: 0,
+            meanPropulsiveVelocity: 0,
+            maxHeight: 0,
+            finalHeight: 0,
+            maxLateral: 0,
+            finalLateral: 0,
+        };
+    }
+
+    private getFixRotation(): Quaternion {
+        return { w: Math.SQRT1_2, x: -Math.SQRT1_2, y: 0, z: 0 };
+    }
+
+    private buildPathFromRecords(records: TrajectoryRecord[], baseline: Vec3): TrajectoryPoint[] {
+        const fix = this.getFixRotation();
+        return records.map((record) => {
+            const q_bar_world = QuatMath.multiply(record.q, this.q_mount);
+            const q_visual = QuatMath.normalize(QuatMath.multiply(fix, q_bar_world));
+            return {
+                timestamp: record.timestamp,
+                position: { ...record.p_raw },
+                rotation: q_visual,
+                relativePosition: {
+                    x: record.p_raw.x - baseline.x,
+                    y: record.p_raw.y - baseline.y,
+                    z: record.p_raw.z - baseline.z,
+                },
+            };
+        });
+    }
+
+    private getDurationMs(startIndex: number, endIndex: number): number {
+        if (endIndex < startIndex) return 0;
+        const start = this.rawDataBuffer[startIndex];
+        const end = this.rawDataBuffer[endIndex];
+        if (!start || !end) return 0;
+        return (end.timestamp - start.timestamp) + (end.dtMs ?? 0);
+    }
+
+    private findStationarySegments(): Array<{ startIndex: number; endIndex: number; durationMs: number }> {
+        const segments: Array<{ startIndex: number; endIndex: number; durationMs: number }> = [];
+        let segmentStart = -1;
+
+        for (let i = 0; i < this.rawDataBuffer.length; i++) {
+            const isStat = !!this.rawDataBuffer[i].isStationary;
+            if (isStat && segmentStart === -1) {
+                segmentStart = i;
+            } else if (!isStat && segmentStart !== -1) {
+                const endIndex = i - 1;
+                segments.push({
+                    startIndex: segmentStart,
+                    endIndex,
+                    durationMs: this.getDurationMs(segmentStart, endIndex),
+                });
+                segmentStart = -1;
+            }
+        }
+
+        if (segmentStart !== -1) {
+            const endIndex = this.rawDataBuffer.length - 1;
+            segments.push({
+                startIndex: segmentStart,
+                endIndex,
+                durationMs: this.getDurationMs(segmentStart, endIndex),
+            });
+        }
+
+        return segments.filter((segment) => segment.durationMs >= this.MIN_IDLE_SECONDS * 1000);
+    }
+
+    private isMovementRecord(record: TrajectoryRecord): boolean {
+        return (record.linAccMag ?? 0) > this.MOVEMENT_LIN_ACC_THRESHOLD
+            || Math.abs(record.v_raw.z) > this.MOVEMENT_VZ_THRESHOLD;
+    }
+
+    private detectMovementStart(fromIndex: number, toIndex: number): number {
+        if (toIndex < fromIndex) return fromIndex;
+
+        let activeMs = 0;
+        let candidateStart = fromIndex;
+
+        for (let i = fromIndex; i <= toIndex; i++) {
+            const record = this.rawDataBuffer[i];
+            const dtMs = Math.max(record.dtMs ?? 0, 1);
+            if (this.isMovementRecord(record)) {
+                if (activeMs === 0) candidateStart = i;
+                activeMs += dtMs;
+                if (activeMs >= this.MIN_MOVEMENT_SECONDS * 1000) {
+                    return candidateStart;
+                }
+            } else {
+                activeMs = 0;
+            }
+        }
+
+        return fromIndex;
+    }
+
+    private detectFallbackMovementEnd(fromIndex: number, toIndex: number): number {
+        if (toIndex < fromIndex) return fromIndex;
+
+        let activeMs = 0;
+        let lastConfirmedEnd = fromIndex;
+
+        for (let i = fromIndex; i <= toIndex; i++) {
+            const record = this.rawDataBuffer[i];
+            const dtMs = Math.max(record.dtMs ?? 0, 1);
+            if (this.isMovementRecord(record)) {
+                activeMs += dtMs;
+                if (activeMs >= this.MIN_MOVEMENT_SECONDS * 1000) {
+                    lastConfirmedEnd = i;
+                }
+            } else {
+                activeMs = 0;
+            }
+        }
+
+        return Math.max(fromIndex, lastConfirmedEnd);
+    }
+
+    private averagePosition(startIndex: number, endIndex: number): Vec3 {
+        if (endIndex < startIndex) {
+            return this.rawDataBuffer[0]?.p_raw ? { ...this.rawDataBuffer[0].p_raw } : Vec3Math.zero();
+        }
+
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        let count = 0;
+        for (let i = startIndex; i <= endIndex; i++) {
+            const position = this.rawDataBuffer[i]?.p_raw;
+            if (!position) continue;
+            sx += position.x;
+            sy += position.y;
+            sz += position.z;
+            count++;
+        }
+
+        if (count === 0) {
+            return this.rawDataBuffer[0]?.p_raw ? { ...this.rawDataBuffer[0].p_raw } : Vec3Math.zero();
+        }
+
+        return { x: sx / count, y: sy / count, z: sz / count };
+    }
+
+    private computeActiveBaseline(initialIdle: { startIndex: number; endIndex: number } | null): Vec3 {
+        if (!initialIdle) {
+            return this.rawDataBuffer[0]?.p_raw ? { ...this.rawDataBuffer[0].p_raw } : Vec3Math.zero();
+        }
+
+        const endRecord = this.rawDataBuffer[initialIdle.endIndex];
+        const windowStartTs = endRecord.timestamp - 100;
+        let windowStartIndex = initialIdle.startIndex;
+        for (let i = initialIdle.endIndex; i >= initialIdle.startIndex; i--) {
+            if (this.rawDataBuffer[i].timestamp < windowStartTs) {
+                windowStartIndex = i + 1;
+                break;
+            }
+            windowStartIndex = i;
+        }
+
+        return this.averagePosition(windowStartIndex, initialIdle.endIndex);
+    }
+
+    private relativeFromBaseline(position: Vec3, baseline: Vec3): Vec3 {
+        return {
+            x: position.x - baseline.x,
+            y: position.y - baseline.y,
+            z: position.z - baseline.z,
+        };
+    }
+
+    private computeMovementMetrics(
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        settledFinalRelative?: Vec3,
+    ): SessionMovementMetrics {
+        if (records.length === 0 || path.length === 0) return this.getEmptyMetrics();
+
+        let peakLinearAcc = 0;
+        let sumVelocity = 0;
+        let velocityCount = 0;
+        let maxHeight = path[0].relativePosition.z;
+        let maxLateral = 0;
+
+        for (const record of records) {
+            const magnitude = record.linAccMag ?? Math.sqrt(
+                record.acc_net.x * record.acc_net.x +
+                record.acc_net.y * record.acc_net.y +
+                record.acc_net.z * record.acc_net.z
+            );
+            if (magnitude > peakLinearAcc) peakLinearAcc = magnitude;
+            if (record.v_raw.z > this.MOVEMENT_VZ_THRESHOLD) {
+                sumVelocity += record.v_raw.z;
+                velocityCount++;
+            }
+        }
+
+        for (const point of path) {
+            if (point.relativePosition.z > maxHeight) {
+                maxHeight = point.relativePosition.z;
+            }
+            const lateral = Math.hypot(point.relativePosition.x, point.relativePosition.y);
+            if (lateral > maxLateral) {
+                maxLateral = lateral;
+            }
+        }
+
+        const lastPoint = path[path.length - 1];
+        const finalRelative = settledFinalRelative ?? lastPoint.relativePosition;
+        return {
+            peakLinearAcc,
+            meanPropulsiveVelocity: velocityCount > 0 ? sumVelocity / velocityCount : 0,
+            maxHeight,
+            finalHeight: finalRelative.z,
+            maxLateral,
+            finalLateral: Math.hypot(finalRelative.x, finalRelative.y),
+        };
+    }
+
+    private buildSessionAnalysis(): SessionAnalysisSummary {
+        const emptyMetrics = this.getEmptyMetrics();
+        if (this.rawDataBuffer.length === 0) {
+            return {
+                movementSegment: null,
+                movementMetrics: emptyMetrics,
+                activePath: [],
+                fullPath: [],
+            };
+        }
+
+        const stationarySegments = this.findStationarySegments();
+        const initialIdle = stationarySegments.length > 0 ? stationarySegments[0] : null;
+        const movementSearchStart = initialIdle ? Math.min(initialIdle.endIndex + 1, this.rawDataBuffer.length - 1) : 0;
+        const movementStart = this.detectMovementStart(movementSearchStart, this.rawDataBuffer.length - 1);
+        const finalIdle = [...stationarySegments]
+            .reverse()
+            .find((segment) => segment.startIndex > movementStart) ?? null;
+
+        let confidence: MovementSegment['confidence'] = 'segmented';
+        if (!initialIdle || !finalIdle) {
+            confidence = 'fallback';
+        }
+
+        let movementEnd = finalIdle
+            ? Math.max(movementStart, finalIdle.startIndex - 1)
+            : this.detectFallbackMovementEnd(movementStart, this.rawDataBuffer.length - 1);
+
+        if (movementEnd < movementStart) {
+            movementEnd = movementStart;
+            confidence = 'insufficient';
+        }
+
+        const baseline = this.computeActiveBaseline(initialIdle);
+        const fullPath = this.buildPathFromRecords(this.rawDataBuffer, baseline);
+        const activeRawData = this.rawDataBuffer.slice(movementStart, movementEnd + 1);
+        const activePath = fullPath.slice(movementStart, movementEnd + 1);
+        const settledFinalPosition = finalIdle
+            ? this.averagePosition(finalIdle.startIndex, finalIdle.endIndex)
+            : activeRawData[activeRawData.length - 1]?.p_raw ?? this.rawDataBuffer[movementEnd].p_raw;
+        const metrics = this.computeMovementMetrics(
+            activeRawData,
+            activePath,
+            this.relativeFromBaseline(settledFinalPosition, baseline),
+        );
+
+        this.activeRawData = activeRawData;
+        this.fullPath = fullPath;
+        this.path = activePath;
+        this.maxLateral = metrics.maxLateral;
+
+        return {
+            movementSegment: {
+                startIndex: movementStart,
+                endIndex: movementEnd,
+                startTimeMs: this.rawDataBuffer[movementStart]?.timestamp ?? this.rawDataBuffer[0].timestamp,
+                endTimeMs: this.rawDataBuffer[movementEnd]?.timestamp ?? this.rawDataBuffer[this.rawDataBuffer.length - 1].timestamp,
+                initialIdleMs: initialIdle?.durationMs ?? 0,
+                finalIdleMs: finalIdle?.durationMs ?? 0,
+                confidence,
+            },
+            movementMetrics: metrics,
+            activePath,
+            fullPath,
+        };
+    }
+
+    /** Returns the recorded active path of trajectory points. */
     public getPath() { return this.path; }
+    /** Returns the full post-processed path for the complete session. */
+    public getFullPath() { return this.fullPath; }
     /**
      * Returns the current orientation of the bar for UI. The raw
      * sensor orientation (sensor->world) is first combined with the
      * fixed mount rotation (bar->sensor) to produce the bar
-     * orientation (bar->world). Then a -90° rotation about the X axis
-     * is applied to convert from the physics Z‑up coordinate frame to
-     * the UI Y‑up coordinate frame. The returned quaternion can be
+     * orientation (bar->world). Then a -90?? rotation about the X axis
+     * is applied to convert from the physics Z???up coordinate frame to
+     * the UI Y???up coordinate frame. The returned quaternion can be
      * passed directly to the OrientationViz component.
      */
     public getOrientation() {
         const q_bar_world = QuatMath.multiply(this.q, this.q_mount);
-        const fix = { w: Math.SQRT1_2, x: -Math.SQRT1_2, y: 0, z: 0 };
+        const fix = this.getFixRotation();
         return QuatMath.normalize(QuatMath.multiply(fix, q_bar_world));
     }
     /** Returns the current linear velocity vector. */
@@ -879,7 +1193,7 @@ export class TrajectoryService {
             this.madgwick.setQuaternion(qInit);
             this.isOrientationInitialized = true;
             console.log('[Hybrid] Calibration complete. Orientation initialised.');
-            // Anchor timestamp to last calibration sample to avoid \"large gap\" reset on next packet
+            // Anchor timestamp to last calibration sample to avoid "large gap" reset on next packet
             const lastCalTs = this.calibrationBuffer[this.calibrationBuffer.length - 1]?.timestampMs;
             this.lastTimestamp = lastCalTs ?? Date.now();
         } else {
@@ -890,132 +1204,72 @@ export class TrajectoryService {
         this.resetKinematics();
     }
 
-    /** Return the raw data buffer for offline analysis. */
+    /** Return the full raw data buffer for offline analysis. */
     public getRawData() { return this.rawDataBuffer; }
-    /** Enable or disable real‑time trajectory updates to the UI. */
+    /** Return the active slice of raw data used for movement charts. */
+    public getActiveRawData() { return this.activeRawData.length > 0 ? this.activeRawData : this.rawDataBuffer; }
+    /** Return the latest session analysis summary. */
+    public getSessionAnalysis(): SessionAnalysisSummary {
+        return this.sessionAnalysis ?? {
+            movementSegment: null,
+            movementMetrics: this.getEmptyMetrics(),
+            activePath: this.path,
+            fullPath: this.fullPath,
+        };
+    }
+    /** Enable or disable real???time trajectory updates to the UI. */
     public setRealtimeEnabled(enabled: boolean) { this.realtimeEnabled = enabled; }
 
     /**
-     * Post‑process the captured raw data into a corrected trajectory path.
+     * Post-process the captured raw data into corrected session paths.
      *
-     * During real‑time streaming we disable UI updates and simply
-     * integrate internally. When streaming stops we can call this
-     * function to construct a full trajectory from the stored raw
-     * samples. It builds a new path by iterating over the raw data
-     * buffer, computing a relative position from the initial point and
-     * applying both the mount rotation and UI fix rotation to the
-     * orientation. This method does not alter the internal filter
-     * state and can be called multiple times. If the rawDataBuffer is
-     * empty, the path will remain empty.
+     * The full session is reconstructed first and then segmented into
+     * initial idle, active movement and final idle. UI metrics and
+     * charts use the active slice; capture health remains separate.
      */
     public applyPostProcessingCorrections() {
-        // Clear any previously computed path
         this.path = [];
+        this.fullPath = [];
+        this.activeRawData = [];
+        this.sessionAnalysis = null;
         if (this.rawDataBuffer.length === 0) {
             console.warn('[Hybrid] applyPostProcessingCorrections: No raw data to process');
             return;
         }
-        // Use the first recorded position as the baseline for relative
-        // displacement. This ensures the trajectory starts at the
-        // origin in the UI. We do not use this.baselineP here
-        // because baselineP may have been modified during streaming
-        // resets. Instead, derive from raw data directly.
-        const first = this.rawDataBuffer[0];
-        const baseline: Vec3 = { x: first.p_raw.x, y: first.p_raw.y, z: first.p_raw.z };
-        const fix: Quaternion = { w: Math.SQRT1_2, x: -Math.SQRT1_2, y: 0, z: 0 };
 
-        // Iterate through raw samples and rebuild trajectory points
-        for (const record of this.rawDataBuffer) {
-            const t = record.timestamp as number;
-            // Use the raw position recorded from the Kalman filter
-            const p_raw: Vec3 = record.p_raw;
-            // Compute relative position from baseline
-            const relP: Vec3 = {
-                x: p_raw.x - baseline.x,
-                y: p_raw.y - baseline.y,
-                z: p_raw.z - baseline.z,
-            };
-            // Raw orientation (sensor->world) at this sample
-            const q_raw: Quaternion = record.q;
-            // Apply mount rotation to convert to bar frame
-            const q_bar_world = QuatMath.multiply(q_raw, this.q_mount);
-            // Apply fix rotation to convert world Z‑up to UI Y‑up
-            const q_visual = QuatMath.normalize(QuatMath.multiply(fix, q_bar_world));
-            // Compose trajectory point
-            this.path.push({
-                timestamp: t,
-                position: { ...p_raw },
-                rotation: q_visual,
-                relativePosition: relP,
-            });
-        }
-        console.log(`[Hybrid] Post-processing complete. Generated ${this.path.length} trajectory points.`);
+        this.sessionAnalysis = this.buildSessionAnalysis();
+        console.log(`[Hybrid] Post-processing complete. Active path: ${this.path.length} points. Full path: ${this.fullPath.length} points.`);
     }
-    // 1️⃣ MÉTODO NUEVO: devuelve la aceleración lineal pico (m/s²)
+
     public getPeakLinearAcceleration(): number {
-        if (!this.rawDataBuffer || this.rawDataBuffer.length === 0) return 0;
-        let maxAcc = 0;
-        for (const s of this.rawDataBuffer) {
-            // acc_net es un Vec3 con la aceleración lineal (sin gravedad) en m/s²
-            const acc = s.acc_net;
-            if (acc) {
-                const mag = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-                if (mag > maxAcc) maxAcc = mag;
-            }
-        }
-        return maxAcc; // valor en m/s²
+        return this.sessionAnalysis?.movementMetrics.peakLinearAcc ?? this.getEmptyMetrics().peakLinearAcc;
     }
 
     /**
-     * Calcula la Velocidad Media Propulsiva (VMP) de la sesión grabada.
-     * Según la literatura (Badillo), es la media de la velocidad durante 
-     * la fase concéntrica donde la aceleración es >= -g.
+     * Calcula la Velocidad Media Propulsiva (VMP) del tramo activo.
      */
     public getMeanPropulsiveVelocity(): number {
-        if (!this.rawDataBuffer || this.rawDataBuffer.length === 0) return 0;
-
-        let sumVelocity = 0;
-        let count = 0;
-
-        for (const sample of this.rawDataBuffer) {
-            const vZ = sample.v_raw.z; // Velocidad vertical (Z-up en física)
-
-            // Fase concéntrica: la barra sube (vZ > 0)
-            // Filtramos un umbral de ruido para vZ y verificamos aceleración
-            if (vZ > 0.05) {
-                sumVelocity += vZ;
-                count++;
-            }
-        }
-
-        return count > 0 ? sumVelocity / count : 0;
+        return this.sessionAnalysis?.movementMetrics.meanPropulsiveVelocity ?? this.getEmptyMetrics().meanPropulsiveVelocity;
     }
 
-    /**
-     * Devuelve la altura máxima alcanzada durante el levantamiento.
-     */
+    /** Devuelve la altura m??xima alcanzada durante el tramo activo. */
     public getMaxHeight(): number {
-        if (this.path.length === 0) return 0;
-        let maxZ = 0;
-        for (const pt of this.path) {
-            // En el objeto path, relativaPosition ya está calculada
-            if (pt.relativePosition.z > maxZ) {
-                maxZ = pt.relativePosition.z;
-            }
-        }
-        return maxZ;
+        return this.sessionAnalysis?.movementMetrics.maxHeight ?? this.getEmptyMetrics().maxHeight;
     }
 
-    /** Desviación lateral máxima (plano X-Y relativo). */
+    /** Altura final del tramo activo. */
+    public getFinalHeight(): number {
+        return this.sessionAnalysis?.movementMetrics.finalHeight ?? this.getEmptyMetrics().finalHeight;
+    }
+
+    /** Desviaci??n lateral m??xima (plano X-Y relativo) del tramo activo. */
     public getMaxLateral(): number {
-        return this.maxLateral;
+        return this.sessionAnalysis?.movementMetrics.maxLateral ?? this.maxLateral;
     }
 
-    /** Desviación lateral final (norma en plano X-Y del último punto). */
+    /** Desviaci??n lateral final (norma en plano X-Y del ??ltimo punto activo). */
     public getFinalLateral(): number {
-        if (this.path.length === 0) return 0;
-        const last = this.path[this.path.length - 1].relativePosition;
-        return Math.hypot(last.x, last.y);
+        return this.sessionAnalysis?.movementMetrics.finalLateral ?? this.getEmptyMetrics().finalLateral;
     }
 }
 
