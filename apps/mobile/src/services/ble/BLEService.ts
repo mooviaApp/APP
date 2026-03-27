@@ -55,6 +55,7 @@ type BLEEventListener = (event: BLEEvent) => void;
 export class BLEService {
     private manager: BleManager;
     private device: Device | null = null;
+    private negotiatedMtu: number = 23;
     private listeners: BLEEventListener[] = [];
     private isScanning = false;
     private reconnectAttempts = 0;
@@ -238,33 +239,25 @@ export class BLEService {
             const services = await device.services();
             console.log('Services discovered:', services.map(s => s.uuid));
 
-            // 3. Enable notifications (Samples & Logs) BEFORE MTU/Start
-            await this.enableNotifications();
-
-            // 4. Request MTU (CRITICAL for large packets)
+            // 3. Request MTU (must be initiated by the central)
             console.log(`[BLE] Requesting MTU: ${BLE_CONFIG.REQUIRED_MTU}`);
-            let negotiatedMTU = 23; // Default MTU if negotiation fails
-
+            this.negotiatedMtu = 23; // default
             try {
                 const updatedDevice = await device.requestMTU(BLE_CONFIG.REQUIRED_MTU);
-                negotiatedMTU = updatedDevice.mtu || BLE_CONFIG.REQUIRED_MTU;
-
-                // CRITICAL: Wait for MTU to be applied by firmware
-                await new Promise(r => setTimeout(r, 100));
-
-                console.log(`[BLE] ✅ MTU negotiated: ${negotiatedMTU} bytes`);
-
-                const maxNotifPayload = negotiatedMTU - 3; // ATT notification overhead
-                if (SENSOR_CONFIG.PACKET_SIZE_BYTES > maxNotifPayload) {
-                    const errorMsg =
-                        `CRITICAL: MTU ${negotiatedMTU} too small. ` +
-                        `Max notif payload is ${maxNotifPayload}, need ${SENSOR_CONFIG.PACKET_SIZE_BYTES}.`;
-                    console.error(`[BLE] ${errorMsg}`);
-                    throw new Error(errorMsg);
-                }
+                this.negotiatedMtu = updatedDevice.mtu || BLE_CONFIG.REQUIRED_MTU;
+                await new Promise(r => setTimeout(r, 100)); // give stack time
+                console.log(`[BLE] ✅ MTU negotiated: ${this.negotiatedMtu} bytes`);
             } catch (error: any) {
-                console.error('[BLE] MTU negotiation FAILED:', error.message);
-                throw new Error(`MTU negotiation failed: ${error.message}`);
+                console.warn('[BLE] MTU negotiation failed, using default 23:', error.message);
+            }
+
+            // 4. Enable notifications (Samples & Logs) after MTU so payloads can fit
+            await this.enableNotifications();
+
+            // Validate packet size vs MTU payload
+            const maxNotifPayload = this.negotiatedMtu - 3; // ATT overhead
+            if (SENSOR_CONFIG.PACKET_SIZE_BYTES > maxNotifPayload) {
+                console.warn(`[BLE] Packet ${SENSOR_CONFIG.PACKET_SIZE_BYTES}B > payload ${maxNotifPayload}B. Expect fragmentation or drop.`);
             }
 
             // 5. Request high connection priority for 1kHz streaming
@@ -398,6 +391,10 @@ export class BLEService {
         try {
             const rawBytes = decodeBase64ToBytes(base64Data);
             const receivedAt = Date.now();
+            const maxPayload = (this.negotiatedMtu || 23) - 3;
+            if (rawBytes.length > maxPayload) {
+                console.warn(`[BLE] Notification length ${rawBytes.length} exceeds MTU payload ${maxPayload}. Packet may be truncated/fragmented.`);
+            }
 
             // EXPLICIT LOGGING FOR FIRMWARE VERIFICATION (commented out for production)
             // const hexPreview = Array.from(rawBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
