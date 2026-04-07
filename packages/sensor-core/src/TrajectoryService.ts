@@ -35,6 +35,8 @@
 import {
     IMUSample,
     MovementSegment,
+    RepAnalysisSummary,
+    RepetitionSummary,
     SessionAnalysisDiagnostics,
     SessionEndPoint,
     SessionAnalysisSummary,
@@ -315,6 +317,22 @@ export class TrajectoryService {
     private readonly END_QUIET_SECONDS = 0.15;
     private readonly END_QUIET_LIN_ACC_THRESHOLD = 0.12;
     private readonly END_QUIET_GYRO_THRESHOLD_DPS = 1.5;
+    private readonly REP_SMOOTH_WINDOW_MS = 35;
+    private readonly REP_SIGN_CONFIRM_MS = 60;
+    private readonly REP_MIN_EXCURSION_M = 0.08;
+    private readonly REP_MIN_DURATION_MS = 250;
+    private readonly REP_MAX_DURATION_MS = 8000;
+    private readonly REP_DETREND_WINDOW_MS = 700;
+    private readonly REP_TURNING_MIN_SEPARATION_MS = 120;
+    private readonly REP_EXTREMA_MERGE_DELTA_M = 0.025;
+    private readonly REP_INTERNAL_PAUSE_SECONDS = 0.22;
+    private readonly REP_INTERNAL_PAUSE_LIN_ACC_THRESHOLD = 0.18;
+    private readonly REP_INTERNAL_PAUSE_GYRO_THRESHOLD_DPS = 3.0;
+    private readonly REP_INTERNAL_VALLEY_SECONDS = 0.08;
+    private readonly REP_INTERNAL_VALLEY_LIN_ACC_THRESHOLD = 0.4;
+    private readonly REP_INTERNAL_VALLEY_GYRO_THRESHOLD_DPS = 10.0;
+    private readonly REP_MIN_RAW_EXCURSION_M = 0.07;
+    private readonly REP_MIN_BLOCK_DURATION_MS = 600;
 
     constructor(expectedHz: number = 1000) {
         this.setExpectedHz(expectedHz);
@@ -916,6 +934,21 @@ export class TrajectoryService {
         };
     }
 
+    private getEmptyRepAnalysis(): RepAnalysisSummary {
+        return {
+            repCount: 0,
+            reps: [],
+            partialRep: null,
+            seriesMeanPropulsiveVelocity: 0,
+            bestRepIndex: null,
+            detectionMode: 'local-cycles',
+            firstDirection: null,
+            detrendWindowMs: this.REP_DETREND_WINDOW_MS,
+            detectedTurningPoints: 0,
+            cycleConfidence: 'low',
+        };
+    }
+
     private getEmptyDiagnostics(): SessionAnalysisDiagnostics {
         return {
             barAxisConfidence: this.barAxisConfidence,
@@ -973,6 +1006,744 @@ export class TrajectoryService {
             position: { ...position },
             relativePosition: this.relativeFromBaseline(position, baseline),
         };
+    }
+
+    private estimateWindowSize(records: TrajectoryRecord[], windowMs: number): number {
+        const dtMs = records
+            .map((record) => record.dtMs ?? 0)
+            .filter((value) => value > 0 && value < 50)
+            .sort((a, b) => a - b);
+        const medianDt = dtMs.length === 0
+            ? 1
+            : dtMs.length % 2 === 0
+                ? (dtMs[dtMs.length / 2 - 1] + dtMs[dtMs.length / 2]) / 2
+                : dtMs[Math.floor(dtMs.length / 2)];
+        return Math.max(1, Math.round(windowMs / Math.max(medianDt, 1)));
+    }
+
+    private movingAverage(values: number[], windowSize: number): number[] {
+        if (values.length === 0 || windowSize <= 1) {
+            return [...values];
+        }
+
+        const prefix: number[] = new Array(values.length + 1).fill(0);
+        for (let i = 0; i < values.length; i++) {
+            prefix[i + 1] = prefix[i] + values[i];
+        }
+
+        const halfWindow = Math.floor(windowSize / 2);
+        return values.map((_, index) => {
+            const start = Math.max(0, index - halfWindow);
+            const end = Math.min(values.length - 1, index + halfWindow);
+            const sum = prefix[end + 1] - prefix[start];
+            return sum / (end - start + 1);
+        });
+    }
+
+    private isVelocitySignSustained(
+        values: number[],
+        dtMs: number[],
+        fromIndex: number,
+        sign: 1 | -1,
+        threshold = this.MOVEMENT_VZ_THRESHOLD,
+    ): boolean {
+        let sustainedMs = 0;
+        for (let i = fromIndex; i < values.length; i++) {
+            if (sign * values[i] > threshold) {
+                sustainedMs += Math.max(dtMs[i] ?? 0, 1);
+                if (sustainedMs >= this.REP_SIGN_CONFIRM_MS) {
+                    return true;
+                }
+            } else {
+                break;
+            }
+        }
+        return false;
+    }
+
+    private findFirstVelocitySign(values: number[], dtMs: number[], sign: 1 | -1): number | null {
+        for (let i = 0; i < values.length; i++) {
+            if (this.isVelocitySignSustained(values, dtMs, i, sign)) {
+                return i;
+            }
+        }
+        return null;
+    }
+
+    private inferRepDirection(values: number[], dtMs: number[]): 'up-first' | 'down-first' {
+        const positiveStart = this.findFirstVelocitySign(values, dtMs, 1);
+        const negativeStart = this.findFirstVelocitySign(values, dtMs, -1);
+
+        if (positiveStart === null && negativeStart === null) {
+            return 'up-first';
+        }
+        if (positiveStart === null) {
+            return 'down-first';
+        }
+        if (negativeStart === null) {
+            return 'up-first';
+        }
+        return positiveStart <= negativeStart ? 'up-first' : 'down-first';
+    }
+
+    private buildRepSummary(
+        index: number,
+        globalOffset: number,
+        direction: 'up-first' | 'down-first',
+        completed: boolean,
+        startLocalIndex: number,
+        apexLocalIndex: number,
+        endLocalIndex: number,
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        localVelocity: number[],
+        localExcursion: number,
+    ): RepetitionSummary {
+        const boundedStart = Math.max(0, Math.min(startLocalIndex, path.length - 1));
+        const boundedApex = Math.max(boundedStart, Math.min(apexLocalIndex, path.length - 1));
+        const boundedEnd = Math.max(boundedApex, Math.min(endLocalIndex, path.length - 1));
+        const sliceRecords = records.slice(boundedStart, boundedEnd + 1);
+        const slicePath = path.slice(boundedStart, boundedEnd + 1);
+        const startPoint = path[boundedStart]?.relativePosition ?? Vec3Math.zero();
+        const endPoint = path[boundedEnd]?.relativePosition ?? startPoint;
+        const sliceVelocity = localVelocity.slice(boundedStart, boundedEnd + 1);
+
+        let propulsiveSum = 0;
+        let propulsiveCount = 0;
+        let peakVerticalVelocity = 0;
+        let peakLinearAcc = 0;
+        let maxHeight = 0;
+        let maxLateral = 0;
+
+        for (let i = 0; i < sliceRecords.length; i++) {
+            const record = sliceRecords[i];
+            const vz = sliceVelocity[i] ?? 0;
+            if (direction === 'up-first') {
+                if (vz > this.MOVEMENT_VZ_THRESHOLD) {
+                    propulsiveSum += vz;
+                    propulsiveCount++;
+                }
+                peakVerticalVelocity = Math.max(peakVerticalVelocity, vz);
+            } else {
+                if (vz < -this.MOVEMENT_VZ_THRESHOLD) {
+                    propulsiveSum += Math.abs(vz);
+                    propulsiveCount++;
+                }
+                peakVerticalVelocity = Math.max(peakVerticalVelocity, Math.abs(vz));
+            }
+
+            const linAcc = record.linAccMag ?? Math.sqrt(
+                record.acc_net.x * record.acc_net.x +
+                record.acc_net.y * record.acc_net.y +
+                record.acc_net.z * record.acc_net.z,
+            );
+            peakLinearAcc = Math.max(peakLinearAcc, linAcc);
+        }
+
+        for (const point of slicePath) {
+            const deltaZ = point.relativePosition.z - startPoint.z;
+            const excursion = direction === 'up-first' ? deltaZ : -deltaZ;
+            maxHeight = Math.max(maxHeight, excursion);
+            const lateral = Math.hypot(
+                point.relativePosition.x - startPoint.x,
+                point.relativePosition.y - startPoint.y,
+            );
+            maxLateral = Math.max(maxLateral, lateral);
+        }
+        maxHeight = Math.max(maxHeight, localExcursion);
+
+        const finalLateral = Math.hypot(
+            endPoint.x - startPoint.x,
+            endPoint.y - startPoint.y,
+        );
+        const netHeight = endPoint.z - startPoint.z;
+        const durationMs = records[boundedEnd].timestamp - records[boundedStart].timestamp;
+        const confidence: RepetitionSummary['confidence'] = completed
+            && durationMs >= this.REP_MIN_DURATION_MS
+            && durationMs <= this.REP_MAX_DURATION_MS
+            && localExcursion >= this.REP_MIN_EXCURSION_M
+            && peakVerticalVelocity >= this.MOVEMENT_VZ_THRESHOLD
+            ? 'high'
+            : 'low';
+
+        return {
+            index,
+            startIndex: globalOffset + boundedStart,
+            apexIndex: globalOffset + boundedApex,
+            endIndex: globalOffset + boundedEnd,
+            startTimeMs: records[boundedStart].timestamp,
+            apexTimeMs: records[boundedApex].timestamp,
+            endTimeMs: records[boundedEnd].timestamp,
+            durationMs,
+            direction,
+            completed,
+            confidence,
+            metrics: {
+                meanPropulsiveVelocity: propulsiveCount > 0 ? propulsiveSum / propulsiveCount : 0,
+                peakVerticalVelocity,
+                peakLinearAcc,
+                maxHeight,
+                netHeight,
+                maxLateral,
+                finalLateral,
+            },
+        };
+    }
+
+    private buildLocalVelocity(values: number[], dtMs: number[]): number[] {
+        if (values.length === 0) return [];
+        if (values.length === 1) return [0];
+
+        const velocity = new Array(values.length).fill(0);
+        for (let i = 1; i < values.length; i++) {
+            const dt = Math.max(dtMs[i] ?? 0, 1) / 1000;
+            velocity[i] = dt > 0 ? (values[i] - values[i - 1]) / dt : 0;
+        }
+        velocity[0] = velocity[1] ?? 0;
+        return velocity;
+    }
+
+    private extractLocalTurningPoints(
+        zLocal: number[],
+        dtMs: number[],
+    ): Array<{ kind: 'max' | 'min'; index: number; value: number }> {
+        if (zLocal.length < 3) {
+            return [];
+        }
+
+        const rawTurningPoints: Array<{ kind: 'max' | 'min'; index: number; value: number }> = [];
+        for (let i = 1; i < zLocal.length - 1; i++) {
+            if (zLocal[i - 1] < zLocal[i] && zLocal[i] >= zLocal[i + 1]) {
+                rawTurningPoints.push({ kind: 'max', index: i, value: zLocal[i] });
+            } else if (zLocal[i - 1] > zLocal[i] && zLocal[i] <= zLocal[i + 1]) {
+                rawTurningPoints.push({ kind: 'min', index: i, value: zLocal[i] });
+            }
+        }
+
+        if (rawTurningPoints.length === 0) {
+            return [];
+        }
+
+        const minSeparation = this.estimateWindowSize(
+            dtMs.map((dt, index) => ({
+                timestamp: index,
+                acc_net: Vec3Math.zero(),
+                q: { w: 1, x: 0, y: 0, z: 0 },
+                p_raw: Vec3Math.zero(),
+                v_raw: Vec3Math.zero(),
+                dtMs: dt,
+            } as TrajectoryRecord)),
+            this.REP_TURNING_MIN_SEPARATION_MS,
+        );
+
+        const filtered: Array<{ kind: 'max' | 'min'; index: number; value: number }> = [];
+        for (const turningPoint of rawTurningPoints) {
+            const last = filtered[filtered.length - 1];
+            if (!last) {
+                filtered.push(turningPoint);
+                continue;
+            }
+
+            if (turningPoint.index - last.index < minSeparation) {
+                if (turningPoint.kind === last.kind) {
+                    const isMoreExtreme = turningPoint.kind === 'max'
+                        ? turningPoint.value > last.value
+                        : turningPoint.value < last.value;
+                    if (isMoreExtreme) {
+                        filtered[filtered.length - 1] = turningPoint;
+                    }
+                    continue;
+                }
+
+                if (Math.abs(turningPoint.value - last.value) >= this.REP_EXTREMA_MERGE_DELTA_M) {
+                    filtered.push(turningPoint);
+                } else if (Math.abs(turningPoint.value) > Math.abs(last.value)) {
+                    filtered[filtered.length - 1] = turningPoint;
+                }
+                continue;
+            }
+
+            filtered.push(turningPoint);
+        }
+
+        return filtered;
+    }
+
+    private detectLocalCycleRepetitions(
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        globalOffset: number,
+        detrendWindowMs: number,
+    ): RepAnalysisSummary {
+        if (records.length < 3 || path.length < 3) {
+            return this.getEmptyRepAnalysis();
+        }
+
+        const windowSize = this.estimateWindowSize(records, this.REP_SMOOTH_WINDOW_MS);
+        const zValues = this.movingAverage(path.map((point) => point.relativePosition.z), windowSize);
+        const dtMs = records.map((record) => Math.max(record.dtMs ?? 0, 1));
+        const detrendWindowSize = this.estimateWindowSize(records, detrendWindowMs);
+        const zTrend = this.movingAverage(zValues, detrendWindowSize);
+        const zLocal = zValues.map((value, index) => value - (zTrend[index] ?? 0));
+        const localVelocity = this.movingAverage(this.buildLocalVelocity(zLocal, dtMs), windowSize);
+        const turningPoints = this.extractLocalTurningPoints(zLocal, dtMs);
+        const reps: RepetitionSummary[] = [];
+        let partialRep: RepetitionSummary | null = null;
+        let cursor = 0;
+        while (cursor <= turningPoints.length - 3) {
+            const start = turningPoints[cursor];
+            const apex = turningPoints[cursor + 1];
+            const end = turningPoints[cursor + 2];
+            const pattern = `${start.kind}-${apex.kind}-${end.kind}`;
+            const isUpFirst = pattern === 'min-max-min';
+            const isDownFirst = pattern === 'max-min-max';
+
+            if (!isUpFirst && !isDownFirst) {
+                cursor += 1;
+                continue;
+            }
+
+            const direction: 'up-first' | 'down-first' = isUpFirst ? 'up-first' : 'down-first';
+            const excursion = Math.abs(apex.value - start.value);
+            const durationMs = records[end.index].timestamp - records[start.index].timestamp;
+
+            if (
+                excursion >= this.REP_MIN_EXCURSION_M
+                && durationMs >= this.REP_MIN_DURATION_MS
+                && durationMs <= this.REP_MAX_DURATION_MS
+            ) {
+                reps.push(
+                    this.buildRepSummary(
+                        reps.length + 1,
+                        globalOffset,
+                        direction,
+                        true,
+                        start.index,
+                        apex.index,
+                        end.index,
+                        records,
+                        path,
+                        localVelocity,
+                        excursion,
+                    ),
+                );
+                cursor += 2;
+                continue;
+            }
+
+            cursor += 1;
+        }
+
+        if (cursor <= turningPoints.length - 2) {
+            for (let i = cursor; i <= turningPoints.length - 2; i++) {
+                const start = turningPoints[i];
+                const apex = turningPoints[i + 1];
+                if (start.kind === apex.kind) {
+                    continue;
+                }
+
+                const direction: 'up-first' | 'down-first' = start.kind === 'min' ? 'up-first' : 'down-first';
+                const excursion = Math.abs(apex.value - start.value);
+                const durationMs = records[records.length - 1].timestamp - records[start.index].timestamp;
+                if (
+                    excursion >= this.REP_MIN_EXCURSION_M
+                    && durationMs >= this.REP_MIN_DURATION_MS
+                    && durationMs <= this.REP_MAX_DURATION_MS
+                ) {
+                    partialRep = this.buildRepSummary(
+                        reps.length + 1,
+                        globalOffset,
+                        direction,
+                        false,
+                        start.index,
+                        apex.index,
+                        path.length - 1,
+                        records,
+                        path,
+                        localVelocity,
+                        excursion,
+                    );
+                    break;
+                }
+            }
+        }
+
+        const seriesMeanPropulsiveVelocity = reps.length > 0
+            ? reps.reduce((sum, rep) => sum + rep.metrics.meanPropulsiveVelocity, 0) / reps.length
+            : 0;
+        const bestRep = reps.reduce<RepetitionSummary | null>((best, rep) => {
+            if (!best || rep.metrics.peakVerticalVelocity > best.metrics.peakVerticalVelocity) {
+                return rep;
+            }
+            return best;
+        }, null);
+        const firstDirection = reps[0]?.direction
+            ?? partialRep?.direction
+            ?? this.inferRepDirection(localVelocity, dtMs);
+        const cycleConfidence: RepAnalysisSummary['cycleConfidence'] =
+            reps.length >= 3 && turningPoints.length >= reps.length * 2 + 1
+                ? 'high'
+                : reps.length > 0 || partialRep
+                    ? 'medium'
+                    : 'low';
+
+        return {
+            repCount: reps.length,
+            reps,
+            partialRep,
+            seriesMeanPropulsiveVelocity,
+            bestRepIndex: bestRep?.index ?? null,
+            detectionMode: 'local-cycles',
+            firstDirection,
+            detrendWindowMs,
+            detectedTurningPoints: turningPoints.length,
+            cycleConfidence,
+        };
+    }
+
+    private isRepPauseRecord(
+        record: TrajectoryRecord,
+        linAccThreshold: number,
+        gyroThresholdDps: number,
+    ): boolean {
+        const linAcc = record.linAccMag ?? Number.POSITIVE_INFINITY;
+        const gyro = record.gyroMagDps ?? Number.POSITIVE_INFINITY;
+        return !!record.isStationary
+            || (
+                linAcc < linAccThreshold
+                && gyro < gyroThresholdDps
+            );
+    }
+
+    private findInternalRepPauseSegments(
+        records: TrajectoryRecord[],
+        minPauseMs: number,
+        linAccThreshold: number,
+        gyroThresholdDps: number,
+    ): Array<{ startIndex: number; endIndex: number; durationMs: number }> {
+        if (records.length < 3) {
+            return [];
+        }
+
+        const segments: Array<{ startIndex: number; endIndex: number; durationMs: number }> = [];
+        let segmentStart = -1;
+
+        for (let i = 0; i < records.length; i++) {
+            if (this.isRepPauseRecord(records[i], linAccThreshold, gyroThresholdDps)) {
+                if (segmentStart === -1) {
+                    segmentStart = i;
+                }
+                continue;
+            }
+
+            if (segmentStart !== -1) {
+                const endIndex = i - 1;
+                const durationMs = Math.max(0, records[endIndex].timestamp - records[segmentStart].timestamp);
+                if (durationMs >= minPauseMs && segmentStart > 0 && endIndex < records.length - 1) {
+                    segments.push({ startIndex: segmentStart, endIndex, durationMs });
+                }
+                segmentStart = -1;
+            }
+        }
+
+        if (segmentStart !== -1) {
+            const endIndex = records.length - 1;
+            const durationMs = Math.max(0, records[endIndex].timestamp - records[segmentStart].timestamp);
+            if (durationMs >= minPauseMs && segmentStart > 0 && endIndex < records.length - 1) {
+                segments.push({ startIndex: segmentStart, endIndex, durationMs });
+            }
+        }
+
+        return segments;
+    }
+
+    private buildRepBlocks(
+        records: TrajectoryRecord[],
+        pauseSegments: Array<{ startIndex: number; endIndex: number }>,
+    ): Array<{ startIndex: number; endIndex: number }> {
+        if (records.length === 0) {
+            return [];
+        }
+
+        const blocks: Array<{ startIndex: number; endIndex: number }> = [];
+        let currentStart = 0;
+
+        for (const segment of pauseSegments) {
+            const blockEnd = segment.startIndex - 1;
+            if (blockEnd >= currentStart) {
+                const durationMs = records[blockEnd].timestamp - records[currentStart].timestamp;
+                if (durationMs >= this.REP_MIN_DURATION_MS) {
+                    blocks.push({ startIndex: currentStart, endIndex: blockEnd });
+                }
+            }
+            currentStart = segment.endIndex + 1;
+        }
+
+        if (currentStart < records.length) {
+            const blockEnd = records.length - 1;
+            const durationMs = records[blockEnd].timestamp - records[currentStart].timestamp;
+            if (durationMs >= this.REP_MIN_DURATION_MS) {
+                blocks.push({ startIndex: currentStart, endIndex: blockEnd });
+            }
+        }
+
+        return blocks;
+    }
+
+    private hasUsableRepBlocks(
+        records: TrajectoryRecord[],
+        blocks: Array<{ startIndex: number; endIndex: number }>,
+        minBlockCount: number,
+    ): boolean {
+        if (blocks.length < minBlockCount) {
+            return false;
+        }
+
+        return blocks.every((block) => {
+            const durationMs = records[block.endIndex].timestamp - records[block.startIndex].timestamp;
+            return durationMs >= this.REP_MIN_BLOCK_DURATION_MS;
+        });
+    }
+
+    private buildMacroRepFromBlock(
+        index: number,
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        globalOffset: number,
+        startIndex: number,
+        endIndex: number,
+    ): RepetitionSummary | null {
+        if (endIndex - startIndex < 2) {
+            return null;
+        }
+
+        const blockRecords = records.slice(startIndex, endIndex + 1);
+        const blockPath = path.slice(startIndex, endIndex + 1);
+        const dtMs = blockRecords.map((record) => Math.max(record.dtMs ?? 0, 1));
+        const windowSize = this.estimateWindowSize(blockRecords, this.REP_SMOOTH_WINDOW_MS);
+        const zValues = this.movingAverage(blockPath.map((point) => point.relativePosition.z), windowSize);
+        const zVelocity = this.movingAverage(this.buildLocalVelocity(zValues, dtMs), windowSize);
+        const startValue = zValues[0] ?? 0;
+        let minLocalIndex = 0;
+        let maxLocalIndex = 0;
+        let minValue = startValue;
+        let maxValue = startValue;
+        for (let i = 1; i < zValues.length; i++) {
+            const candidate = zValues[i] ?? 0;
+            if (candidate < minValue) {
+                minValue = candidate;
+                minLocalIndex = i;
+            }
+            if (candidate > maxValue) {
+                maxValue = candidate;
+                maxLocalIndex = i;
+            }
+        }
+
+        const downwardExcursion = Math.max(0, startValue - minValue);
+        const upwardExcursion = Math.max(0, maxValue - startValue);
+        const direction: 'up-first' | 'down-first' = downwardExcursion >= upwardExcursion
+            ? 'down-first'
+            : 'up-first';
+        const apexLocalIndex = direction === 'down-first' ? minLocalIndex : maxLocalIndex;
+        const apexIndex = startIndex + apexLocalIndex;
+        const rawExcursion = Math.abs(
+            (path[apexIndex]?.relativePosition.z ?? 0) - (path[startIndex]?.relativePosition.z ?? 0),
+        );
+        const durationMs = records[endIndex].timestamp - records[startIndex].timestamp;
+        if (
+            rawExcursion < this.REP_MIN_RAW_EXCURSION_M
+            || durationMs < this.REP_MIN_DURATION_MS
+            || durationMs > this.REP_MAX_DURATION_MS
+        ) {
+            return null;
+        }
+
+        return this.buildRepSummary(
+            index,
+            globalOffset,
+            direction,
+            true,
+            startIndex,
+            apexIndex,
+            endIndex,
+            records,
+            path,
+            zVelocity,
+            rawExcursion,
+        );
+    }
+
+    private analyzeLocalCyclesAcrossWindows(
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        globalOffset: number,
+    ): RepAnalysisSummary {
+        if (records.length < 3 || path.length < 3) {
+            return this.getEmptyRepAnalysis();
+        }
+
+        const candidateWindows = Array.from(new Set([
+            Math.max(200, this.REP_DETREND_WINDOW_MS - 100),
+            this.REP_DETREND_WINDOW_MS,
+            this.REP_DETREND_WINDOW_MS + 100,
+        ]));
+        const confidenceRank: Record<RepAnalysisSummary['cycleConfidence'], number> = {
+            low: 0,
+            medium: 1,
+            high: 2,
+        };
+
+        let bestAnalysis = this.getEmptyRepAnalysis();
+        for (const detrendWindowMs of candidateWindows) {
+            const candidate = this.detectLocalCycleRepetitions(records, path, globalOffset, detrendWindowMs);
+            if (candidate.repCount > bestAnalysis.repCount) {
+                bestAnalysis = candidate;
+                continue;
+            }
+            if (candidate.repCount < bestAnalysis.repCount) {
+                continue;
+            }
+
+            const candidateHasPartial = candidate.partialRep ? 1 : 0;
+            const bestHasPartial = bestAnalysis.partialRep ? 1 : 0;
+            if (candidateHasPartial > bestHasPartial) {
+                bestAnalysis = candidate;
+                continue;
+            }
+            if (candidateHasPartial < bestHasPartial) {
+                continue;
+            }
+
+            if (confidenceRank[candidate.cycleConfidence] > confidenceRank[bestAnalysis.cycleConfidence]) {
+                bestAnalysis = candidate;
+                continue;
+            }
+            if (confidenceRank[candidate.cycleConfidence] < confidenceRank[bestAnalysis.cycleConfidence]) {
+                continue;
+            }
+
+            if (candidate.detectedTurningPoints > bestAnalysis.detectedTurningPoints) {
+                bestAnalysis = candidate;
+            }
+        }
+
+        return bestAnalysis;
+    }
+
+    private buildRepAnalysisFromBlocks(
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        globalOffset: number,
+        blocks: Array<{ startIndex: number; endIndex: number }>,
+    ): RepAnalysisSummary {
+        const reps: RepetitionSummary[] = [];
+        let partialRep: RepetitionSummary | null = null;
+        const turningPoints = blocks.length * 3;
+
+        blocks.forEach((block, blockIndex) => {
+            const rep = this.buildMacroRepFromBlock(
+                reps.length + 1,
+                records,
+                path,
+                globalOffset,
+                block.startIndex,
+                block.endIndex,
+            );
+            if (rep) {
+                reps.push(rep);
+                return;
+            }
+
+            if (blockIndex === blocks.length - 1) {
+                const blockRecords = records.slice(block.startIndex, block.endIndex + 1);
+                const blockPath = path.slice(block.startIndex, block.endIndex + 1);
+                const blockAnalysis = this.analyzeLocalCyclesAcrossWindows(
+                    blockRecords,
+                    blockPath,
+                    globalOffset + block.startIndex,
+                );
+                if (blockAnalysis.partialRep) {
+                    partialRep = {
+                        ...blockAnalysis.partialRep,
+                        index: reps.length + 1,
+                    };
+                }
+            }
+        });
+
+        const seriesMeanPropulsiveVelocity = reps.length > 0
+            ? reps.reduce((sum, rep) => sum + rep.metrics.meanPropulsiveVelocity, 0) / reps.length
+            : 0;
+        const bestRep = reps.reduce<RepetitionSummary | null>((best, rep) => {
+            if (!best || rep.metrics.peakVerticalVelocity > best.metrics.peakVerticalVelocity) {
+                return rep;
+            }
+            return best;
+        }, null);
+
+        let detrendWindowMs = this.REP_DETREND_WINDOW_MS;
+
+        const finalPartialRep = partialRep as RepetitionSummary | null;
+        const cycleConfidence: RepAnalysisSummary['cycleConfidence'] =
+            reps.length === blocks.length && reps.length > 0
+                ? 'high'
+                : reps.length > 0 || finalPartialRep
+                    ? 'medium'
+                    : 'low';
+        let firstDirection: RepAnalysisSummary['firstDirection'] = null;
+        if (reps.length > 0) {
+            firstDirection = reps[0].direction;
+        } else if (finalPartialRep !== null) {
+            firstDirection = finalPartialRep.direction;
+        }
+
+        return {
+            repCount: reps.length,
+            reps,
+            partialRep: finalPartialRep,
+            seriesMeanPropulsiveVelocity,
+            bestRepIndex: bestRep?.index ?? null,
+            detectionMode: 'local-cycles',
+            firstDirection,
+            detrendWindowMs,
+            detectedTurningPoints: turningPoints,
+            cycleConfidence,
+        };
+    }
+
+    private analyzeRepetitions(
+        records: TrajectoryRecord[],
+        path: TrajectoryPoint[],
+        globalOffset: number,
+    ): RepAnalysisSummary {
+        if (records.length < 3 || path.length < 3) {
+            return this.getEmptyRepAnalysis();
+        }
+
+        const strictPauseSegments = this.findInternalRepPauseSegments(
+            records,
+            this.REP_INTERNAL_PAUSE_SECONDS * 1000,
+            this.REP_INTERNAL_PAUSE_LIN_ACC_THRESHOLD,
+            this.REP_INTERNAL_PAUSE_GYRO_THRESHOLD_DPS,
+        );
+        const strictBlocks = this.buildRepBlocks(records, strictPauseSegments);
+        if (this.hasUsableRepBlocks(records, strictBlocks, 3)) {
+            return this.buildRepAnalysisFromBlocks(records, path, globalOffset, strictBlocks);
+        }
+
+        const valleySegments = this.findInternalRepPauseSegments(
+            records,
+            this.REP_INTERNAL_VALLEY_SECONDS * 1000,
+            this.REP_INTERNAL_VALLEY_LIN_ACC_THRESHOLD,
+            this.REP_INTERNAL_VALLEY_GYRO_THRESHOLD_DPS,
+        );
+        const valleyBlocks = this.buildRepBlocks(records, valleySegments);
+        if (this.hasUsableRepBlocks(records, valleyBlocks, 4)) {
+            return this.buildRepAnalysisFromBlocks(records, path, globalOffset, valleyBlocks);
+        }
+
+        return this.analyzeLocalCyclesAcrossWindows(records, path, globalOffset);
     }
 
     private findStationarySegments(): Array<{ startIndex: number; endIndex: number; durationMs: number }> {
@@ -1218,6 +1989,7 @@ export class TrajectoryService {
 
     private buildSessionAnalysis(): SessionAnalysisSummary {
         const emptyMetrics = this.getEmptyMetrics();
+        const emptyRepAnalysis = this.getEmptyRepAnalysis();
         const diagnostics: SessionAnalysisDiagnostics = {
             barAxisConfidence: this.barAxisConfidence,
             effectiveTickUs: this.estimateEffectiveTickUsFromRecords(this.rawDataBuffer),
@@ -1226,6 +1998,7 @@ export class TrajectoryService {
             return {
                 movementSegment: null,
                 movementMetrics: emptyMetrics,
+                repAnalysis: emptyRepAnalysis,
                 activePath: [],
                 fullPath: [],
                 activeEndPoint: null,
@@ -1262,6 +2035,8 @@ export class TrajectoryService {
         const fullPath = this.buildPathFromRecords(this.rawDataBuffer, baseline);
         const activeRawData = this.rawDataBuffer.slice(movementStart, movementEnd + 1);
         const activePath = fullPath.slice(movementStart, movementEnd + 1);
+        const repRawData = this.rawDataBuffer.slice(movementStart, candidateMovementEnd + 1);
+        const repPath = fullPath.slice(movementStart, candidateMovementEnd + 1);
         const activeEndRecord = activeRawData[activeRawData.length - 1] ?? this.rawDataBuffer[movementEnd];
         const activeEndPoint = activePath.length > 0
             ? this.buildEndPoint(activePath[activePath.length - 1].timestamp, activeEndRecord.p_raw, baseline)
@@ -1295,6 +2070,15 @@ export class TrajectoryService {
             settledEndPoint.relativePosition,
             residualVelocity.speed,
         );
+        const repAnalysisCandidate = this.analyzeRepetitions(repRawData, repPath, movementStart);
+        const trimmedRepAnalysis = this.analyzeRepetitions(activeRawData, activePath, movementStart);
+        const repAnalysis = (
+            repAnalysisCandidate.repCount === 0
+            && !repAnalysisCandidate.partialRep
+            && (trimmedRepAnalysis.repCount > 0 || !!trimmedRepAnalysis.partialRep)
+        )
+            ? trimmedRepAnalysis
+            : repAnalysisCandidate;
         const endReason: MovementSegment['endReason'] = confidence === 'fallback'
             ? 'fallback'
             : quietTail.killApplied
@@ -1321,6 +2105,7 @@ export class TrajectoryService {
                 confidence,
             },
             movementMetrics: metrics,
+            repAnalysis,
             activePath,
             fullPath,
             activeEndPoint,
@@ -1401,6 +2186,7 @@ export class TrajectoryService {
         return this.sessionAnalysis ?? {
             movementSegment: null,
             movementMetrics: this.getEmptyMetrics(),
+            repAnalysis: this.getEmptyRepAnalysis(),
             activePath: this.path,
             fullPath: this.fullPath,
             activeEndPoint: null,

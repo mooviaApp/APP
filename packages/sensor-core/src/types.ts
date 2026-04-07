@@ -131,6 +131,44 @@ export interface SessionEndPoint {
     relativePosition: Vec3;
 }
 
+export interface RepetitionMetrics {
+    meanPropulsiveVelocity: number;
+    peakVerticalVelocity: number;
+    peakLinearAcc: number;
+    maxHeight: number;
+    netHeight: number;
+    maxLateral: number;
+    finalLateral: number;
+}
+
+export interface RepetitionSummary {
+    index: number;
+    startIndex: number;
+    apexIndex: number;
+    endIndex: number;
+    startTimeMs: number;
+    apexTimeMs: number;
+    endTimeMs: number;
+    durationMs: number;
+    direction: 'up-first' | 'down-first';
+    completed: boolean;
+    confidence: 'high' | 'low';
+    metrics: RepetitionMetrics;
+}
+
+export interface RepAnalysisSummary {
+    repCount: number;
+    reps: RepetitionSummary[];
+    partialRep: RepetitionSummary | null;
+    seriesMeanPropulsiveVelocity: number;
+    bestRepIndex: number | null;
+    detectionMode: 'local-cycles';
+    firstDirection: 'up-first' | 'down-first' | null;
+    detrendWindowMs: number;
+    detectedTurningPoints: number;
+    cycleConfidence: 'high' | 'medium' | 'low';
+}
+
 export interface SessionAnalysisDiagnostics {
     barAxisConfidence: 'high' | 'low' | 'unavailable';
     effectiveTickUs: number | null;
@@ -139,6 +177,7 @@ export interface SessionAnalysisDiagnostics {
 export interface SessionAnalysisSummary {
     movementSegment: MovementSegment | null;
     movementMetrics: SessionMovementMetrics;
+    repAnalysis: RepAnalysisSummary;
     activePath: TrajectoryPoint[];
     fullPath: TrajectoryPoint[];
     activeEndPoint: SessionEndPoint | null;

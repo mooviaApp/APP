@@ -1,0 +1,271 @@
+﻿\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\sisetup{output-decimal-marker={,}}
+
+\title{Deteccion hibrida de repeticiones V4 sobre trayectorias IMU-only}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Resumen ejecutivo}
+Las pruebas V4 confirman que el cuello principal ya no es BLE: tanto la sesion de cinco repeticiones como la de tres repeticiones llegan con \texttt{missingPackets = 0}. El problema estaba en la heuristica de repeticiones: primero dependia de volver al baseline absoluto y despues sobre-segmentaba rebotes internos como si fuesen reps nuevas.
+
+En esta iteracion el analisis pasa a un esquema \textbf{hibrido}:
+\begin{itemize}[leftmargin=14pt]
+  \item si hay pausas internas claras, se usan como fronteras de macro-rep;
+  \item si no las hay, se usa un detector de ciclos locales sobre una senal vertical detrendida;
+  \item el conteo se hace sobre una ventana de reps mas larga que la trayectoria recortada, para no perder la ultima rep por culpa del \texttt{quiet\_tail}.
+\end{itemize}
+
+Con este cambio:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{v4-5reps-moovia-session-1775503335652.json} vuelve a \texttt{repCount = 5}
+  \item \texttt{v4-3reps-moovia-session-1775506305263.json} pasa de \texttt{4 + parcial} a \texttt{repCount = 3}
+\end{itemize}
+
+\section{Diagnostico del V4 real}
+El archivo objetivo es:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{C:\textbackslash MOOVIA\_APP\textbackslash APP\textbackslash JSON\_PRUEBAS\_VERTICALES\textbackslash v4-5reps-moovia-session-1775503335652.json}
+\end{itemize}
+
+Antes del cambio, el analisis compartido producia este patron:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{repCount = 0}
+  \item \texttt{partialRep = null}
+  \item tramo activo en \texttt{fallback}
+  \item altura casi monotona: \texttt{maxHeight} $\approx$ \SI{0,019}{m}, \texttt{finalHeight} $\approx$ \SI{-11,27}{m}
+  \item velocidad vertical integrada casi siempre negativa: \texttt{min} $\approx$ \SI{-3,99}{m/s}, \texttt{max} $\approx$ \SI{0,15}{m/s}
+\end{itemize}
+
+La captura, sin embargo, estaba sana:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{11550} samples y \texttt{770} paquetes
+  \item \texttt{avgRate} $\approx$ \SI{1060,88}{Hz}
+  \item \texttt{missingPackets = 0}
+  \item \texttt{missingSamples = 0}
+  \item \texttt{maxGap = 59 ms}
+\end{itemize}
+
+La conclusion es directa: la radio no estaba ocultando las reps. El problema era puramente de interpretacion de la senal vertical reconstruida.
+
+\section{Por que fallaba la heuristica anterior}
+La heuristica previa intentaba detectar una rep completa como una oscilacion vertical que:
+\begin{enumerate}[leftmargin=16pt]
+  \item sale de un baseline,
+  \item alcanza un extremo,
+  \item y vuelve a ese mismo baseline absoluto dentro de una tolerancia.
+\end{enumerate}
+
+Ese modelo funciona mientras la trayectoria global no derive demasiado. En V4 no se cumple esa condicion: la componente vertical integrada se desplaza hacia abajo a lo largo de toda la ventana activa. Aunque localmente si existan cinco ciclos mecanicos, el eje \(Z\) global nunca vuelve a la misma cota absoluta. Por eso el sistema terminaba interpretando toda la sesion como un unico movimiento largo y no como cinco repeticiones.
+
+\section{Nueva heuristica: detector hibrido}
+El detector nuevo mantiene el postprocesado \emph{offline} tras \emph{Stream Off}, pero cambia la forma de construir la rep dependiendo del patron observado.
+
+\subsection*{Pipeline implementado}
+\begin{enumerate}[leftmargin=16pt]
+  \item Se parte del \textbf{tramo activo} ya segmentado por \texttt{TrajectoryService}.
+  \item Se construye una \textbf{ventana de reps} que puede ser mas larga que el path mostrado, para no recortar la ultima rep cuando aparece un \texttt{quiet\_tail}.
+  \item Primero se buscan \textbf{pausas internas} o \textbf{valles de baja energia} dentro de esa ventana.
+  \item Si aparecen bloques internos suficientemente largos, cada bloque se trata como una macro-rep.
+  \item Si no aparecen pausas utiles, se activa el detector de \textbf{ciclos locales detrendidos}.
+  \item En ese modo se suaviza \(z\) con una ventana corta de \SI{35}{ms}.
+  \item Se calcula una tendencia lenta con media movil larga. El algoritmo prueba varias ventanas y escoge la que mejor explica la estructura ciclica:
+  \begin{itemize}[leftmargin=14pt]
+    \item \SI{600}{ms}
+    \item \SI{700}{ms}
+    \item \SI{800}{ms}
+  \end{itemize}
+  \item Se construye \(z_{local} = z_{smooth} - z_{trend}\).
+  \item Se calcula una velocidad local derivada de \(z_{local}\), tambien suavizada.
+  \item Se extraen puntos de giro locales (maximos y minimos) y se fusionan los demasiado proximos.
+  \item Las reps se forman como \textbf{tripletas de extremos locales}:
+  \begin{itemize}[leftmargin=14pt]
+    \item \texttt{up-first}: minimo $\rightarrow$ maximo $\rightarrow$ minimo
+    \item \texttt{down-first}: maximo $\rightarrow$ minimo $\rightarrow$ maximo
+  \end{itemize}
+  \item Una rep se acepta si cumple:
+  \begin{itemize}[leftmargin=14pt]
+    \item excursion local minima de \SI{0,08}{m}
+    \item duracion entre \SI{250}{ms} y \SI{8000}{ms}
+    \item tercer extremo presente (rep cerrada)
+  \end{itemize}
+\end{enumerate}
+
+\subsection*{Cambio de criterio de velocidad}
+A partir de esta iteracion, la metrica principal de velocidad por rep es \textbf{peakVerticalVelocity}. La VMP se mantiene por compatibilidad, pero pasa a ser secundaria en la UI y en el analisis.
+
+\section{Resultados obtenidos}
+\subsection*{Caso objetivo V4 de cinco repeticiones}
+Con la heuristica hibrida, el caso objetivo pasa a:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{repCount = 5}
+  \item \texttt{partialRep = null}
+  \item \texttt{firstDirection = down-first}
+  \item \texttt{detrendWindowMs = 700}
+  \item \texttt{detectedTurningPoints = 15}
+  \item \texttt{cycleConfidence = high}
+\end{itemize}
+
+\textbf{Interpretacion:}
+\begin{itemize}[leftmargin=14pt]
+  \item el conteo ya coincide con la realidad conocida de la prueba;
+  \item la quinta rep deja de perderse aunque el \texttt{activePath} se recorte para visualizacion;
+  \item los valores por rep siguen siendo provisionales y todavia no deben tratarse como metricas finales de producto.
+\end{itemize}
+
+\subsection*{Caso real de tres reps visuales}
+La sesion \texttt{v4-3reps-moovia-session-1775506305263.json} era el ejemplo mas claro de sobre-segmentacion: visualmente se veian tres macro-reps, pero el resumen llegaba a \texttt{4 + parcial}.
+
+Con el detector hibrido, el resultado pasa a:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{repCount = 3}
+  \item \texttt{partialRep = null}
+  \item \texttt{firstDirection = down-first}
+  \item \texttt{cycleConfidence = high}
+\end{itemize}
+
+\begin{table}[h!]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llll}
+\toprule
+Caso & Estado previo & Estado actual & Lectura correcta \\
+\midrule
+V4 5 reps & \texttt{repCount = 0} & \texttt{repCount = 5} & serie continua sin pausas fuertes \\
+V4 3 reps & \texttt{4 + parcial} & \texttt{repCount = 3} & tres macro-reps con pausas internas \\
+V3 bueno & \texttt{1 rep} & rep parcial o nula & regresion todavia abierta \\
+V3 malo & rep incompleta & rep incompleta o nula & no inventa reps falsas \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Estado del detector tras introducir segmentacion hibrida.}
+\end{table}
+
+\textbf{Interpretacion:}
+\begin{itemize}[leftmargin=14pt]
+  \item las pausas internas pasan a mandar cuando existen;
+  \item los micro-rebotes dejan de contar como reps nuevas en el caso de tres repeticiones;
+  \item el detector sigue funcionando en series continuas cuando no hay pausas claras.
+\end{itemize}
+
+\subsection*{Regresion sobre V3}
+La comprobacion cruzada deja este estado:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{V3-moovia-session-1774637899200.json}: actualmente cae en rep parcial o nula dependiendo de la ventana usada
+  \item \texttt{V3-moovia-session-1774637821525.json}: sigue sin inventar reps falsas
+\end{itemize}
+
+Esto significa que el detector mejora claramente en V4, pero todavia no esta completamente cerrado como solucion unica para todos los patrones V3/V4. En especial:
+\begin{itemize}[leftmargin=14pt]
+  \item el V3 ``bueno'' aun necesita afinado para recuperar su rep unica con esta nueva logica;
+  \item el V3 ``malo'' sigue comportandose de forma segura porque no introduce multiplies falsos.
+\end{itemize}
+
+\subsection*{Problema explicado en documentacion}
+El problema de fondo queda ya descrito asi:
+\begin{enumerate}[leftmargin=16pt]
+  \item la trayectoria vertical global deriva;
+  \item dentro de esa deriva aparecen reps reales y tambien micro-rebotes;
+  \item un detector puramente local tiende a sobre-segmentar;
+  \item un detector puramente global pierde reps cuando no se vuelve al mismo baseline.
+\end{enumerate}
+
+Por eso la solucion razonable en esta fase no es un unico criterio, sino una combinacion:
+\begin{itemize}[leftmargin=14pt]
+  \item macro-bloques por pausas internas cuando existan;
+  \item detector local cuando no existan;
+  \item ventana de reps mas larga que el path mostrado;
+  \item rechazo de conclusiones fuertes sobre metricas mientras la velocidad vertical por rep siga siendo inestable.
+\end{itemize}
+
+\section{Cambios visibles en producto}
+\subsection*{Web-test}
+Se actualiza la tarjeta \texttt{Repetition Analysis} para priorizar \texttt{peakVerticalVelocity} y se anade una tarjeta nueva \texttt{Rep Detection Debug} con:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{detectionMode}
+  \item \texttt{firstDirection}
+  \item \texttt{turning points detected}
+  \item \texttt{cycleConfidence}
+\end{itemize}
+
+Ademas, los marcadores \texttt{start/apex/end} sobre \(Z(t)\) siguen activos y ahora reflejan el detector de ciclos locales.
+
+\subsection*{App movil}
+El bloque \texttt{Repeticiones} tras \emph{Stream Off} cambia el orden de lectura:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{velocidad pico media}
+  \item \texttt{mejor rep}
+  \item \texttt{VMP media serie}
+  \item por rep, primero \texttt{velocidad pico} y despues \texttt{VMP}
+\end{itemize}
+
+Si existe una rep incompleta, se muestra aparte sin sumarla a \texttt{repCount}.
+
+\section{Limitaciones que siguen vigentes}
+Este cambio mejora mucho el conteo, pero no elimina el techo IMU-only:
+\begin{itemize}[leftmargin=14pt]
+  \item la trayectoria 3D absoluta sigue sin ser fiable
+  \item el yaw absoluto puede derivar
+  \item la lateral sigue siendo cualitativa cuando la manga gira o la orientacion cambia mucho
+  \item los valores por rep (altura, peakVz, VMP) todavia necesitan una segunda fase de estabilizacion
+  \item si la reconstruccion vertical colapsa por completo, el detector puede degradarse y quedarse en rep parcial
+\end{itemize}
+
+En otras palabras, ahora contamos mejor las reps aunque la trayectoria global derive. Eso mejora mucho el producto para analisis de series, pero no convierte la solucion en un ``flight log'' absoluto.
+
+\section{Sobre un pendulo y el problema del yaw}
+Anadir un pendulo, o un inclinometro MEMS equivalente, \textbf{no resuelve por si solo un yaw seguro}. Un pendulo aporta una referencia de gravedad muy util para estabilizar:
+\begin{itemize}[leftmargin=14pt]
+  \item inclinacion
+  \item vertical efectiva
+  \item robustez de la segmentacion vertical
+  \item cierre del gesto cuando la IMU rota o vibra
+\end{itemize}
+
+Eso si puede ayudar a mejorar:
+\begin{itemize}[leftmargin=14pt]
+  \item la deteccion de reps
+  \item la altura relativa
+  \item la separacion entre movimiento real y rebote espurio
+\end{itemize}
+
+Pero el yaw sigue siendo una rotacion alrededor de la propia gravedad. Un pendulo no observa esa rotacion; solo ve ``donde esta abajo''. Por tanto:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{pendulo / inclinometro}: mejora roll y pitch, no fija yaw
+  \item \textbf{magnetometro}: aporta heading absoluto y es el candidato natural para estabilizar yaw
+  \item \textbf{referencia externa} (vision, encoder, UWB, GNSS segun entorno): necesaria si se quiere una trayectoria absoluta tipo ``flight log''
+\end{itemize}
+
+La conclusion tecnica es:
+\begin{itemize}[leftmargin=14pt]
+  \item si el objetivo inmediato es contar mejor reps y estabilizar la vertical, un pendulo puede ser util
+  \item si el objetivo es tener un yaw seguro, el pendulo \textbf{no basta}
+  \item para yaw fiable hay que ir a magnetometro bien calibrado o a una referencia externa
+\end{itemize}
+
+\section*{Conclusion}
+La iteracion V4 confirma un avance real: ya no dependemos ni de volver al mismo baseline absoluto ni de un unico detector local. Con la heuristica \textbf{hibrida}, el sistema ya resuelve dos patrones distintos:
+\begin{itemize}[leftmargin=14pt]
+  \item series continuas sin pausas claras (\texttt{5 reps})
+  \item series con pausas internas limpias (\texttt{3 reps})
+\end{itemize}
+
+El resultado practico es bueno para producto: el conteo ya se parece mucho mas a la realidad del levantamiento. El siguiente trabajo ya no es contar, sino estabilizar mejor las metricas por rep y seguir cerrando la regresion de algunos V3.
+
+\end{document}

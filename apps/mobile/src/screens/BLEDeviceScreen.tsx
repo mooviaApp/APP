@@ -68,6 +68,13 @@ export function BLEDeviceScreen() {
         getCaptureStats,
     } = useBLE();
     const [captureStats, setCaptureStats] = useState<CaptureHealthStats | null>(null);
+    const repAnalysis = sessionAnalysis?.repAnalysis ?? null;
+    const bestRep = repAnalysis?.bestRepIndex != null
+        ? repAnalysis.reps.find((rep) => rep.index === repAnalysis.bestRepIndex) ?? null
+        : null;
+    const meanPeakVerticalVelocity = repAnalysis && repAnalysis.reps.length > 0
+        ? repAnalysis.reps.reduce((sum, rep) => sum + rep.metrics.peakVerticalVelocity, 0) / repAnalysis.reps.length
+        : 0;
 
     const handleStartStreaming = async () => {
         setFinalPath([]); // Clear previous graph
@@ -87,7 +94,7 @@ export function BLEDeviceScreen() {
             setFinalPath([...trajectoryService.getPath()]);
             const analysis = trajectoryService.getSessionAnalysis();
 
-            // Obtener mÃ©tricas despuÃ©s del post-processing
+            // Obtener metricas despues del post-processing
             const peakAcc = analysis.movementMetrics.peakLinearAcc;
             const vmp = analysis.movementMetrics.meanPropulsiveVelocity;
             const height = analysis.movementMetrics.maxHeight;
@@ -101,15 +108,15 @@ export function BLEDeviceScreen() {
             setCaptureStats(capStats);
             setSessionAnalysis(analysis);
 
-            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/sÂ², VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
+            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/s^2, VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
 
             // DEBUG ALERT: Confirm data quantity to user
             Alert.alert(
                 "Resultados del Levantamiento",
-                `VMP: ${vmp.toFixed(2)} m/s\nAceleracion Pico: ${peakAcc.toFixed(2)} m/s²\nAltura maxima: ${height.toFixed(2)} m\nAltura asentada: ${analysis.movementMetrics.settledEndHeight.toFixed(2)} m\nLateral activa: ${analysis.movementMetrics.activeEndLateral.toFixed(2)} m\nLateral asentada: ${analysis.movementMetrics.settledEndLateral.toFixed(2)} m`
+                `VMP: ${vmp.toFixed(2)} m/s\nAceleracion pico: ${peakAcc.toFixed(2)} m/s^2\nAltura maxima: ${height.toFixed(2)} m\nAltura asentada: ${analysis.movementMetrics.settledEndHeight.toFixed(2)} m\nLateral activa: ${analysis.movementMetrics.activeEndLateral.toFixed(2)} m\nLateral asentada: ${analysis.movementMetrics.settledEndLateral.toFixed(2)} m`
             );
         } catch (e: any) {
-            Alert.alert("Error", "Failed to stop stream: " + e.message);
+            Alert.alert('Error', 'No se pudo detener el stream: ' + e.message);
         }
     };
 
@@ -124,10 +131,10 @@ export function BLEDeviceScreen() {
             disabled={isConnected}
         >
             <View>
-                <Text style={styles.deviceName}>{item.name || 'Unknown Device'}</Text>
+                <Text style={styles.deviceName}>{item.name || 'Dispositivo desconocido'}</Text>
                 <Text style={styles.deviceId}>{item.id}</Text>
             </View>
-            <Text style={styles.connectButton}>Connect</Text>
+            <Text style={styles.connectButton}>Conectar</Text>
         </TouchableOpacity>
     );
 
@@ -144,7 +151,7 @@ export function BLEDeviceScreen() {
         try {
             const exportData = getRawSession();
             if (exportData.samples.length === 0 && exportData.rawPackets.length === 0) {
-                Alert.alert('Sin datos', 'No hay muestras registradas aÃºn.');
+                Alert.alert('Sin datos', 'No hay muestras registradas aun.');
                 return;
             }
 
@@ -163,11 +170,11 @@ export function BLEDeviceScreen() {
 
             await Sharing.shareAsync(fileUri, {
                 mimeType: 'application/json',
-                dialogTitle: 'MOOVIA session export',
+                dialogTitle: 'Exportar sesion MOOVIA',
             });
         } catch (err: any) {
             console.error('Export failed', err);
-            Alert.alert('Error', 'No se pudo exportar la sesiÃ³n: ' + err.message);
+            Alert.alert('Error', 'No se pudo exportar la sesion: ' + err.message);
         }
     };
 
@@ -180,7 +187,7 @@ export function BLEDeviceScreen() {
             {/* Header */}
             <View style={styles.header}>
                 <Text style={styles.headerTitle}>MOOVIA Sensor</Text>
-                <Text style={styles.headerSubtitle}>BLE Device Manager</Text>
+                <Text style={styles.headerSubtitle}>Panel BLE</Text>
             </View>
 
             <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
@@ -189,7 +196,7 @@ export function BLEDeviceScreen() {
                     <View style={styles.errorContainer}>
                         <Text style={styles.errorText}>{error}</Text>
                         <TouchableOpacity onPress={clearError}>
-                            <Text style={styles.errorDismiss}>Dismiss</Text>
+                            <Text style={styles.errorDismiss}>Cerrar</Text>
                         </TouchableOpacity>
                     </View>
                 )}
@@ -197,17 +204,17 @@ export function BLEDeviceScreen() {
                 {/* Connection Status */}
                 <View style={styles.statusCard}>
                     <View style={styles.statusRow}>
-                        <Text style={styles.statusLabel}>Status:</Text>
+                        <Text style={styles.statusLabel}>Estado:</Text>
                         <View style={[styles.statusBadge, isConnected && styles.statusBadgeConnected]}>
                             <Text style={styles.statusText}>
-                                {isConnected ? 'Connected' : 'Disconnected'}
+                                {isConnected ? 'Conectado' : 'Desconectado'}
                             </Text>
                         </View>
                     </View>
 
                     {currentDevice && (
                         <Text style={styles.deviceInfo}>
-                            Device: {currentDevice.name || currentDevice.id}
+                            Dispositivo: {currentDevice.name || currentDevice.id}
                         </Text>
                     )}
 
@@ -219,7 +226,7 @@ export function BLEDeviceScreen() {
                                 whoAmI.isValid ? styles.whoAmIValid : styles.whoAmIInvalid
                             ]}>
                                 0x{whoAmI.value.toString(16).toUpperCase()}
-                                {whoAmI.isValid ? ' âœ“' : ' âœ—'}
+                                {whoAmI.isValid ? ' OK' : ' FAIL'}
                             </Text>
                         </View>
                     )}
@@ -228,7 +235,7 @@ export function BLEDeviceScreen() {
                 {/* Scanner Section */}
                 {!isConnected && (
                     <View style={styles.section}>
-                        <Text style={styles.sectionTitle}>Scan for Devices</Text>
+                        <Text style={styles.sectionTitle}>Escanear dispositivos</Text>
 
                         <TouchableOpacity
                             style={[styles.scanButton, isScanning && styles.scanButtonActive]}
@@ -236,14 +243,14 @@ export function BLEDeviceScreen() {
                         >
                             {isScanning && <ActivityIndicator color="#FFFFFF" style={{ marginRight: 8 }} />}
                             <Text style={styles.scanButtonText}>
-                                {isScanning ? 'Stop Scanning' : 'Start Scan'}
+                                {isScanning ? 'Detener escaneo' : 'Escanear dispositivos'}
                             </Text>
                         </TouchableOpacity>
 
                         {devices.length > 0 && (
                             <View style={styles.deviceList}>
                                 <Text style={styles.deviceListTitle}>
-                                    Found {devices.length} device(s)
+                                    Encontrados {devices.length} dispositivo(s)
                                 </Text>
                                 <FlatList
                                     data={devices}
@@ -255,7 +262,7 @@ export function BLEDeviceScreen() {
                         )}
 
                         {isScanning && devices.length === 0 && (
-                            <Text style={styles.scanningText}>Scanning for MOOVIA devices...</Text>
+                            <Text style={styles.scanningText}>Buscando dispositivos MOOVIA...</Text>
                         )}
                     </View>
                 )}
@@ -264,35 +271,35 @@ export function BLEDeviceScreen() {
                 {isConnected && (
                     <>
                         <View style={styles.section}>
-                            <Text style={styles.sectionTitle}>Control Panel</Text>
+                            <Text style={styles.sectionTitle}>Panel de control</Text>
 
                             <View style={styles.controlGrid}>
                                 <ControlButton
                                     label="WHO AM I"
                                     onPress={sendWhoAmI}
                                     color={COLORS.primary}
-                                    icon="?"
+                                    icon="ID"
                                 />
                                 <ControlButton
-                                    label="Stream On"
+                                    label="Iniciar stream"
                                     onPress={handleStartStreaming}
                                     color={COLORS.success}
-                                    icon="â–¶"
+                                    icon="ON"
                                 />
                             </View>
 
                             <View style={[styles.controlGrid, { marginTop: 12 }]}>
                                 <ControlButton
-                                    label="Stream Off"
+                                    label="Detener stream"
                                     onPress={handleStopStreaming}
                                     color={COLORS.warning}
-                                    icon="â– "
+                                    icon="OFF"
                                 />
                                 <ControlButton
-                                    label="Hard Reset"
+                                    label="Reset IMU"
                                     onPress={resetIMU}
                                     color={COLORS.danger}
-                                    icon="ðŸ”Œ"
+                                    icon="RST"
                                 />
                             </View>
 
@@ -300,14 +307,14 @@ export function BLEDeviceScreen() {
                                 style={[styles.controlButton, { width: '100%', marginTop: 12, backgroundColor: '#333' }]}
                                 onPress={handleExportSession}
                             >
-                                <Text style={styles.controlButtonText}>ðŸ’¾ Export Session JSON</Text>
+                                <Text style={styles.controlButtonText}>Exportar JSON RAW</Text>
                             </TouchableOpacity>
 
                             <TouchableOpacity
                                 style={styles.disconnectButton}
                                 onPress={disconnect}
                             >
-                                <Text style={styles.disconnectButtonText}>Disconnect</Text>
+                                <Text style={styles.disconnectButtonText}>Desconectar</Text>
                             </TouchableOpacity>
                         </View>
 
@@ -333,7 +340,7 @@ export function BLEDeviceScreen() {
 
                                 {maxHeight !== null && (
                                     <View style={[styles.metricCard, { borderColor: COLORS.primary }]}>
-                                        <Text style={styles.metricLabel}>Altura MÃ¡xima</Text>
+                                        <Text style={styles.metricLabel}>Altura maxima</Text>
                                         <Text style={[styles.metricValue, { color: COLORS.primary }]}>
                                             {maxHeight.toFixed(2)}
                                         </Text>
@@ -342,7 +349,7 @@ export function BLEDeviceScreen() {
                                 )}
                                 {maxLateral !== null && (
                                     <View style={[styles.metricCard, { borderColor: COLORS.warning }]}>
-                                        <Text style={styles.metricLabel}>DesviaciÃ³n Lateral</Text>
+                                        <Text style={styles.metricLabel}>Desviacion lateral</Text>
                                         <Text style={[styles.metricValue, { color: COLORS.warning }]}>
                                             {maxLateral.toFixed(2)}
                                         </Text>
@@ -351,11 +358,11 @@ export function BLEDeviceScreen() {
                                 )}
                                 {peakAcceleration !== null && (
                                     <View style={[styles.metricCard, { borderColor: COLORS.accent }]}>
-                                        <Text style={styles.metricLabel}>Acel. Lineal Pico</Text>
+                                        <Text style={styles.metricLabel}>Aceleracion pico</Text>
                                         <Text style={[styles.metricValue, { color: COLORS.accent }]}>
                                             {peakAcceleration.toFixed(2)}
                                         </Text>
-                                        <Text style={styles.metricUnit}>m/sÂ²</Text>
+                                        <Text style={styles.metricUnit}>m/s^2</Text>
                                     </View>
                                 )}
                             </View>
@@ -476,10 +483,99 @@ export function BLEDeviceScreen() {
                             </View>
                         )}
 
+                        {repAnalysis && (
+                            <View style={styles.captureCard}>
+                                <Text style={styles.sectionTitle}>Repeticiones</Text>
+                                <Text style={styles.captureHint}>
+                                    El conteo se calcula offline sobre el tramo activo, usando ciclos locales en el eje Z.
+                                </Text>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>reps completas</Text>
+                                    <Text style={styles.captureValue}>{repAnalysis.repCount}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>velocidad pico media</Text>
+                                    <Text style={styles.captureValue}>{meanPeakVerticalVelocity.toFixed(3)} m/s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>mejor rep</Text>
+                                    <Text style={styles.captureValue}>{bestRep ? `Rep ${bestRep.index}` : '--'}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>VMP media serie</Text>
+                                    <Text style={styles.captureValue}>{repAnalysis.seriesMeanPropulsiveVelocity.toFixed(3)} m/s</Text>
+                                </View>
+
+                                {repAnalysis.reps.map((rep) => (
+                                    <View key={`rep-${rep.index}`} style={styles.repCard}>
+                                        <Text style={styles.repTitle}>Rep {rep.index}</Text>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>direccion</Text>
+                                            <Text style={styles.captureValue}>{rep.direction}</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>duracion</Text>
+                                            <Text style={styles.captureValue}>{(rep.durationMs / 1000).toFixed(2)} s</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>velocidad pico</Text>
+                                            <Text style={styles.captureValue}>{rep.metrics.peakVerticalVelocity.toFixed(3)} m/s</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>VMP</Text>
+                                            <Text style={styles.captureValue}>{rep.metrics.meanPropulsiveVelocity.toFixed(3)} m/s</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>aceleracion pico</Text>
+                                            <Text style={styles.captureValue}>{rep.metrics.peakLinearAcc.toFixed(3)} m/s^2</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>altura max</Text>
+                                            <Text style={styles.captureValue}>{rep.metrics.maxHeight.toFixed(3)} m</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>lateral max</Text>
+                                            <Text style={styles.captureValue}>{rep.metrics.maxLateral.toFixed(3)} m</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>confidence</Text>
+                                            <Text style={styles.captureValue}>{rep.confidence}</Text>
+                                        </View>
+                                    </View>
+                                ))}
+
+                                {repAnalysis.partialRep && (
+                                    <View style={styles.repCard}>
+                                        <Text style={styles.repTitle}>Rep incompleta</Text>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>direccion</Text>
+                                            <Text style={styles.captureValue}>{repAnalysis.partialRep.direction}</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>duracion</Text>
+                                            <Text style={styles.captureValue}>{(repAnalysis.partialRep.durationMs / 1000).toFixed(2)} s</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>velocidad pico</Text>
+                                            <Text style={styles.captureValue}>{repAnalysis.partialRep.metrics.peakVerticalVelocity.toFixed(3)} m/s</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>altura max</Text>
+                                            <Text style={styles.captureValue}>{repAnalysis.partialRep.metrics.maxHeight.toFixed(3)} m</Text>
+                                        </View>
+                                        <View style={styles.captureRow}>
+                                            <Text style={styles.captureLabel}>confidence</Text>
+                                            <Text style={styles.captureValue}>{repAnalysis.partialRep.confidence}</Text>
+                                        </View>
+                                    </View>
+                                )}
+                            </View>
+                        )}
+
                         {/* Logs */}
                         {logs.length > 0 && (
                             <View style={styles.section}>
-                                <Text style={styles.sectionTitle}>Device Logs</Text>
+                                <Text style={styles.sectionTitle}>Logs del dispositivo</Text>
                                 <View style={styles.logContainer}>
                                     <FlatList
                                         data={logs.slice().reverse()}
@@ -803,6 +899,18 @@ const styles = StyleSheet.create({
         color: COLORS.text,
         fontSize: 13,
         fontWeight: '700',
+    },
+    repCard: {
+        marginTop: 12,
+        paddingTop: 12,
+        borderTopWidth: 1,
+        borderTopColor: '#333',
+    },
+    repTitle: {
+        color: COLORS.text,
+        fontSize: 14,
+        fontWeight: '700',
+        marginBottom: 8,
     },
 });
 

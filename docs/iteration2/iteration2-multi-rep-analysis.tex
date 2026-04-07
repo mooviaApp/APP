@@ -1,0 +1,179 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\sisetup{output-decimal-marker={,}}
+
+\title{Analisis tecnico: multi-rep por sesion y limpieza de UI}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Resumen ejecutivo}
+Esta iteracion amplifica el analisis posterior al \emph{Stream Off}: el sistema deja de asumir una unica repeticion implicita y pasa a construir un bloque especifico de \texttt{repAnalysis} sobre el tramo activo ya segmentado. El objetivo no es hacer conteo en vivo, sino ofrecer un resumen util y trazable por sesion con:
+\begin{itemize}[leftmargin=14pt]
+  \item numero de repeticiones completas;
+  \item lista de reps cerradas con inicio, apex, fin y metricas propias;
+  \item posible rep parcial final, reportada aparte y no contada;
+  \item limpieza de textos visibles en la app movil para eliminar mojibake y dejar labels legibles.
+\end{itemize}
+
+\section{Motivacion}
+Hasta ahora la app y el web-test ya podian describir un tramo activo unico: velocidad media propulsiva, altura, lateral, salud de captura y resumen del endpoint activo/asentado. Eso era suficiente para sesiones de una sola repeticion, pero no para series reales.
+
+El cambio de enfoque es importante:
+\begin{itemize}[leftmargin=14pt]
+  \item la metrica global de sesion sigue existiendo y no se rompe;
+  \item por encima de ella se anade un analisis por repeticion, calculado \textbf{solo offline}, una vez terminada la captura;
+  \item el sistema deja claro que una serie puede contener reps completas y una ultima rep incompleta.
+\end{itemize}
+
+\section{Estado previo}
+Antes de este cambio ya existia una maquina de estados interna con transiciones del tipo \texttt{IDLE -> MOVING -> APEX -> RETURN}, pero ese flujo servia como apoyo para el seguimiento del gesto, no como feature de producto. En concreto, faltaban cuatro piezas:
+\begin{enumerate}[leftmargin=16pt]
+  \item un contrato publico de \texttt{repAnalysis};
+  \item una lista de reps con indices y tiempos;
+  \item metricas por rep desacopladas de las metricas globales de sesion;
+  \item una UI que mostrara el conteo y limpiara los textos rotos en la app movil.
+\end{enumerate}
+
+\section{Heuristica elegida}
+La heuristica implementada trabaja sobre el \textbf{tramo activo ya segmentado}, no sobre toda la sesion. Esto evita mezclar colocacion inicial, reposo y cola quieta con la dinamica real del levantamiento.
+
+\subsection*{Regla de ciclo completo}
+La repeticion se define como \textbf{ciclo completo}:
+\begin{itemize}[leftmargin=14pt]
+  \item si la serie arranca subiendo, la rep se interpreta como \texttt{valle -> apex -> vuelta al valle};
+  \item si la serie arranca bajando, la rep se interpreta como \texttt{pico -> valle -> vuelta al pico}.
+\end{itemize}
+
+\subsection*{Señal vertical usada}
+La deteccion usa el eje \(Z\) ya reconstruido por el pipeline compartido, junto con una version suavizada de \(v_z\). No se exige estado estacionario duro para separar reps, de modo que dos reps seguidas sin pausa larga tambien puedan contarse.
+
+\subsection*{Parametros}
+Los parametros fijados en la implementacion son:
+\begin{itemize}[leftmargin=14pt]
+  \item ventana de suavizado de \SI{35}{ms} sobre \(z\) y \(v_z\);
+  \item excursion minima de \SI{0,08}{m};
+  \item tolerancia de retorno de \SI{0,04}{m};
+  \item duracion minima de \SI{250}{ms};
+  \item duracion maxima de \SI{8000}{ms};
+  \item confirmacion del cambio de signo de velocidad durante al menos \SI{60}{ms}.
+\end{itemize}
+
+\section{Modelo de datos nuevo}
+La salida compartida \texttt{SessionAnalysisSummary} incorpora un bloque \texttt{repAnalysis}. Sobre ese bloque se publican dos tipos nuevos:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{RepetitionSummary}: describe una rep concreta con indices, tiempos, direccion, estado de completitud, confianza y metricas;
+  \item \texttt{RepAnalysisSummary}: resume toda la serie con \texttt{repCount}, lista de reps, \texttt{partialRep}, VMP media de serie y mejor rep.
+\end{itemize}
+
+Las metricas por rep son:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{meanPropulsiveVelocity};
+  \item \texttt{peakVerticalVelocity};
+  \item \texttt{peakLinearAcc};
+  \item \texttt{maxHeight};
+  \item \texttt{netHeight};
+  \item \texttt{maxLateral};
+  \item \texttt{finalLateral}.
+\end{itemize}
+
+\section{Diferencia frente a las metricas globales}
+La capa multi-rep no sustituye a las metricas globales del tramo activo; las complementa.
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.2cm}X X}
+\toprule
+Bloque & Que mide & Para que sirve \\
+\midrule
+\texttt{movementMetrics} & resumen del tramo activo completo & ver la sesion como un unico gesto estabilizado \\
+\texttt{repAnalysis.reps[i]} & metrica de una rep concreta & comparar reps dentro de una misma serie \\
+\texttt{partialRep} & ultima rep no cerrada & avisar de que hubo gesto sin retorno suficiente \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Esto evita romper compatibilidad con la app, el web-test y los JSON existentes, al tiempo que habilita una lectura mas deportiva y mas util para series reales.
+
+\section{Cambios visibles en UI}
+\subsection*{Web-test}
+El web-test ahora muestra:
+\begin{itemize}[leftmargin=14pt]
+  \item tarjeta \texttt{Repetition Analysis};
+  \item tabla con \#, direccion, duracion, VMP, velocidad pico, aceleracion pico, altura maxima, lateral maxima y confianza;
+  \item marcadores de \texttt{start}, \texttt{apex} y \texttt{end} sobre la grafica \(Z(t)\).
+\end{itemize}
+
+\subsection*{App movil}
+La app movil ahora muestra, tras \emph{Detener stream}:
+\begin{itemize}[leftmargin=14pt]
+  \item reps completas;
+  \item VMP media de la serie;
+  \item mejor rep;
+  \item una card por rep con duracion, VMP, velocidad pico, aceleracion pico, altura maxima y lateral maxima;
+  \item rep incompleta si existe.
+\end{itemize}
+
+Ademas se limpiaron los labels visibles que estaban afectados por mojibake. Botones y mensajes quedan en texto simple, por ejemplo:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{Iniciar stream};
+  \item \texttt{Detener stream};
+  \item \texttt{Reset IMU};
+  \item \texttt{Exportar JSON RAW};
+  \item \texttt{Conectado} / \texttt{Desconectado}.
+\end{itemize}
+
+\section{Validacion con los JSON V3}
+Aunque los V3 siguen siendo sesiones de gesto practicamente unico, son utiles para validar el nuevo flujo:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{V3-moovia-session-1774637899200.json}: la heuristica detecta \textbf{1 rep completa} con direccion \texttt{up-first}. La forma \emph{sube un poco antes de bajar} sigue visible y la rep queda resumida con VMP, altura y lateral propias.
+  \item \texttt{V3-moovia-session-1774637821525.json}: la heuristica no fuerza un falso positivo; registra \textbf{0 reps completas} y una \texttt{partialRep down-first}. Esto es coherente con una sesion que no vuelve lo suficiente al nivel inicial de la rep dentro de la tolerancia configurada.
+\end{itemize}
+
+Ese comportamiento es importante: el contador no inventa reps cerradas cuando la trayectoria IMU-only no ofrece evidencia suficiente de retorno.
+
+\section{Limitaciones}
+Este cambio mejora mucho la lectura de serie, pero mantiene los limites fisicos del sistema actual:
+\begin{itemize}[leftmargin=14pt]
+  \item sigue siendo un algoritmo \textbf{offline/postprocesado}, no conteo en vivo;
+  \item depende de la calidad de la reconstruccion vertical del tramo activo;
+  \item una deriva vertical grande puede convertir una rep real en \texttt{partialRep};
+  \item la lateral sigue siendo relativa e IMU-only;
+  \item el sistema no se debe vender como contador perfecto de reps multi-eje en cualquier ejercicio.
+\end{itemize}
+
+En otras palabras: el nuevo bloque multi-rep es muy util para sesiones verticales estructuradas, pero sigue heredando el techo de observabilidad IMU-only descrito en la documentacion V3 previa.
+
+\section{Casos esperados de uso}
+La heuristica esta pensada para soportar estos escenarios:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{1 rep aislada}: debe devolver \texttt{repCount = 1} si la rep cierra bien;
+  \item \textbf{3 reps seguidas sin pausa larga}: deben seguir contandose porque no se exige \texttt{isStatState} entre reps;
+  \item \textbf{3 reps con pausa breve}: deben detectarse como reps independientes;
+  \item \textbf{ultima rep incompleta}: debe aparecer en \texttt{partialRep} y no sumarse al contador.
+\end{itemize}
+
+\section*{Conclusion}
+Esta iteracion hace dos cosas valiosas a la vez:
+\begin{enumerate}[leftmargin=16pt]
+  \item convierte el analisis compartido en una base real para series con multiples reps;
+  \item limpia la UI movil para que el resultado sea legible y usable por cualquier persona del equipo.
+\end{enumerate}
+
+No resuelve el limite IMU-only, pero si organiza mejor la informacion y evita que el sistema trate toda la sesion como una sola repeticion implita. Ese paso era necesario para que la siguiente fase del proyecto pueda comparar reps, detectar parciales y acercarse a una herramienta de entrenamiento realmente util.
+
+\end{document}

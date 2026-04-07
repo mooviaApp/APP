@@ -50,10 +50,14 @@ const processedNoteEl = document.getElementById('processed-note') as HTMLElement
 const analysisNoteEl = document.getElementById('analysis-note') as HTMLElement;
 const geometryMetaEl = document.getElementById('geometry-meta') as HTMLElement;
 const algorithmLimitsEl = document.getElementById('algorithm-limits') as HTMLElement;
+const repSummaryEl = document.getElementById('rep-summary') as HTMLElement;
+const partialRepEl = document.getElementById('partial-rep') as HTMLElement;
+const repDebugEl = document.getElementById('rep-debug') as HTMLElement;
 const path2dTitleEl = document.getElementById('path-2d-title') as HTMLElement;
 const trajectory3dEl = document.getElementById('trajectory-3d') as HTMLElement;
 const rawTableBody = document.querySelector('#raw-table tbody') as HTMLElement;
 const packetTableBody = document.querySelector('#packet-table tbody') as HTMLElement;
+const repTableBody = document.querySelector('#rep-table tbody') as HTMLElement;
 const captureStatusEl = document.getElementById('capture-status') as HTMLElement;
 const projectionButtons = Array.from(document.querySelectorAll('.projection-btn')) as HTMLButtonElement[];
 const captureMetricsEl = {
@@ -120,6 +124,7 @@ function buildDisplayPath(analysis: SessionAnalysisSummary): DisplayPoint[] {
 function resetTables() {
     rawTableBody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 40px; color: var(--text-muted);">Please load a JSON file</td></tr>';
     packetTableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: var(--text-muted);">No packets loaded</td></tr>';
+    repTableBody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 20px; color: var(--text-muted);">No reps detected</td></tr>';
 }
 
 function resetCharts() {
@@ -145,6 +150,9 @@ function resetMetrics() {
     analysisNoteEl.innerText = 'La trayectoria 3D es una reconstruccion relativa basada solo en IMU; el yaw puede derivar.';
     geometryMetaEl.innerHTML = '<p>No data loaded</p>';
     algorithmLimitsEl.innerHTML = '<p>No data loaded</p>';
+    repSummaryEl.innerHTML = '<p>No repetition analysis yet.</p>';
+    partialRepEl.innerHTML = '<p>No partial rep.</p>';
+    repDebugEl.innerHTML = '<p>No rep debug yet.</p>';
     captureStatusEl.className = 'status-pill status-unknown';
     captureStatusEl.innerText = 'No data';
     Object.values(captureMetricsEl).forEach((element) => {
@@ -162,6 +170,71 @@ function setCaptureHealthUnavailable(message = 'Legacy') {
 
 function formatVector(x: number, y: number, z: number) {
     return `X ${x.toFixed(3)}, Y ${y.toFixed(3)}, Z ${z.toFixed(3)}`;
+}
+
+function formatDirection(direction: 'up-first' | 'down-first') {
+    return direction === 'up-first' ? 'up-first' : 'down-first';
+}
+
+function renderRepAnalysis(analysis: SessionAnalysisSummary | null, isLegacy = false) {
+    if (!analysis || isLegacy) {
+        repSummaryEl.innerHTML = '<p><strong>Status:</strong> repetition analysis unavailable for this file.</p>';
+        repTableBody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 20px; color: var(--text-muted);">No reps available</td></tr>';
+        partialRepEl.innerHTML = '<p><strong>Partial rep:</strong> not available.</p>';
+        repDebugEl.innerHTML = '<p><strong>Mode:</strong> rep debug unavailable for this file.</p>';
+        return;
+    }
+
+    const repAnalysis = analysis.repAnalysis;
+    const meanPeakVz = repAnalysis.reps.length > 0
+        ? repAnalysis.reps.reduce((sum, rep) => sum + rep.metrics.peakVerticalVelocity, 0) / repAnalysis.reps.length
+        : 0;
+    repSummaryEl.innerHTML = `
+        <p><strong>repCount:</strong> ${repAnalysis.repCount}</p>
+        <p><strong>meanPeakVerticalVelocity:</strong> ${meanPeakVz.toFixed(3)} m/s</p>
+        <p><strong>seriesMeanPropulsiveVelocity:</strong> ${repAnalysis.seriesMeanPropulsiveVelocity.toFixed(3)} m/s</p>
+        <p><strong>bestRepIndex:</strong> ${repAnalysis.bestRepIndex ?? '--'}</p>
+    `;
+
+    repDebugEl.innerHTML = `
+        <p><strong>detectionMode:</strong> ${repAnalysis.detectionMode}</p>
+        <p><strong>firstDirection:</strong> ${repAnalysis.firstDirection ?? '--'}</p>
+        <p><strong>turning points detected:</strong> ${repAnalysis.detectedTurningPoints}</p>
+        <p><strong>detrendWindowMs:</strong> ${repAnalysis.detrendWindowMs}</p>
+        <p><strong>cycleConfidence:</strong> ${repAnalysis.cycleConfidence}</p>
+    `;
+
+    if (repAnalysis.reps.length === 0) {
+        repTableBody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 20px; color: var(--text-muted);">No completed reps detected</td></tr>';
+    } else {
+        repTableBody.innerHTML = repAnalysis.reps.map((rep) => `
+              <tr>
+                  <td>${rep.index}</td>
+                  <td>${formatDirection(rep.direction)}</td>
+                  <td>${(rep.durationMs / 1000).toFixed(2)}</td>
+                  <td>${rep.metrics.peakVerticalVelocity.toFixed(3)}</td>
+                  <td>${rep.metrics.meanPropulsiveVelocity.toFixed(3)}</td>
+                  <td>${rep.metrics.peakLinearAcc.toFixed(3)}</td>
+                  <td>${rep.metrics.maxHeight.toFixed(3)}</td>
+                  <td>${rep.metrics.maxLateral.toFixed(3)}</td>
+                  <td>${rep.confidence}</td>
+            </tr>
+        `).join('');
+    }
+
+    if (repAnalysis.partialRep) {
+        const rep = repAnalysis.partialRep;
+        partialRepEl.innerHTML = `
+            <p><strong>Partial rep:</strong> rep ${rep.index} (${formatDirection(rep.direction)})</p>
+            <p><strong>Duration:</strong> ${(rep.durationMs / 1000).toFixed(2)} s</p>
+            <p><strong>PeakVz:</strong> ${rep.metrics.peakVerticalVelocity.toFixed(3)} m/s</p>
+            <p><strong>VMP:</strong> ${rep.metrics.meanPropulsiveVelocity.toFixed(3)} m/s</p>
+            <p><strong>MaxHeight:</strong> ${rep.metrics.maxHeight.toFixed(3)} m</p>
+            <p><strong>Confidence:</strong> ${rep.confidence}</p>
+        `;
+    } else {
+        partialRepEl.innerHTML = '<p><strong>Partial rep:</strong> none.</p>';
+    }
 }
 
 async function reset3dPlot() {
@@ -309,6 +382,7 @@ function processRawTrajectory(rawData: any[]) {
     updateChartsFromRaw(rawData);
     updateGeometryDiagnostics(currentPath, null, null, true);
     updateAlgorithmLimits(null, null, true);
+    renderRepAnalysis(null, true);
     void renderTrajectory3D(currentPath);
 }
 
@@ -347,9 +421,22 @@ function updateChartsFromRaw(rawData: any[]) {
 
     charts.position.data.labels = rawData.map((_: unknown, index: number) => index);
     charts.position.data.datasets[0].data = rawData.map((entry) => entry.p_raw.z);
+    charts.position.data.datasets[1].data = rawData.map(() => null);
+    charts.position.data.datasets[2].data = rawData.map(() => null);
+    charts.position.data.datasets[3].data = rawData.map(() => null);
     charts.position.update();
 
     updateProjectionChart(currentPath);
+}
+
+function buildRepMarkerDataset(length: number, indexes: number[], values: number[]) {
+    const series = Array.from({ length }, () => null as number | null);
+    indexes.forEach((index, idx) => {
+        if (index >= 0 && index < length) {
+            series[index] = values[idx];
+        }
+    });
+    return series;
 }
 
 function processData() {
@@ -374,6 +461,7 @@ function processData() {
     updateCaptureHealth(captureStats);
     updateGeometryDiagnostics(currentPath, captureStats, analysis, false);
     updateAlgorithmLimits(analysis, captureStats, false);
+    renderRepAnalysis(analysis, false);
     void renderTrajectory3D(currentPath);
 }
 
@@ -523,6 +611,9 @@ function setupCharts() {
             labels: [],
             datasets: [
                 { label: 'Pos Z', data: [], borderColor: '#1DF09F', borderWidth: 3, pointRadius: 0 },
+                { label: 'Rep start', data: [], borderColor: '#501FF0', backgroundColor: '#501FF0', showLine: false, pointRadius: 4, pointHoverRadius: 5 },
+                { label: 'Rep apex', data: [], borderColor: '#F0DC1D', backgroundColor: '#F0DC1D', showLine: false, pointRadius: 4, pointHoverRadius: 5 },
+                { label: 'Rep end', data: [], borderColor: '#F0411D', backgroundColor: '#F0411D', showLine: false, pointRadius: 4, pointHoverRadius: 5 },
             ],
         },
         options: { ...commonOptions, plugins: { legend: { display: true, labels: { color: '#fff' } } } },
@@ -560,6 +651,10 @@ function setupCharts() {
 
 function updateCharts(analysis: SessionAnalysisSummary) {
     const rawData = trajectoryService.getActiveRawData();
+    const movementStartIndex = analysis.movementSegment?.startIndex ?? 0;
+    const repStarts = analysis.repAnalysis.reps.map((rep) => rep.startIndex - movementStartIndex);
+    const repApexes = analysis.repAnalysis.reps.map((rep) => rep.apexIndex - movementStartIndex);
+    const repEnds = analysis.repAnalysis.reps.map((rep) => rep.endIndex - movementStartIndex);
 
     charts.accel.data.labels = rawData.map((_: unknown, index: number) => index);
     charts.accel.data.datasets[0].data = rawData.map((entry) => entry.acc_net.x);
@@ -572,7 +667,11 @@ function updateCharts(analysis: SessionAnalysisSummary) {
     charts.velocity.update();
 
     charts.position.data.labels = currentPath.map((_: DisplayPoint, index: number) => index);
-    charts.position.data.datasets[0].data = currentPath.map((point) => point.z);
+    const zValues = currentPath.map((point) => point.z);
+    charts.position.data.datasets[0].data = zValues;
+    charts.position.data.datasets[1].data = buildRepMarkerDataset(currentPath.length, repStarts, repStarts.map((index) => zValues[index] ?? 0));
+    charts.position.data.datasets[2].data = buildRepMarkerDataset(currentPath.length, repApexes, repApexes.map((index) => zValues[index] ?? 0));
+    charts.position.data.datasets[3].data = buildRepMarkerDataset(currentPath.length, repEnds, repEnds.map((index) => zValues[index] ?? 0));
     charts.position.update();
 
     updateProjectionChart(currentPath);

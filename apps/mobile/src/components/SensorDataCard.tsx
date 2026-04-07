@@ -11,30 +11,26 @@ interface SensorDataCardProps {
     trajectoryPath?: TrajectoryPoint[];
 }
 
-// SIMPLIFIED: Only IDLE and CALIBRATING states for calibration testing
 type LiftState = 'IDLE' | 'CALIBRATING';
 
 export function SensorDataCard({ data, isCalibrating: isCalibratingProp, trajectoryPath }: SensorDataCardProps) {
     const [liftState, setLiftState] = useState<LiftState>('IDLE');
 
-    // SIMPLIFIED State machine: IDLE ↔ CALIBRATING only
     useEffect(() => {
-
         if (isCalibratingProp && liftState !== 'CALIBRATING') {
             setLiftState('CALIBRATING');
-            console.log('[UI] State: → CALIBRATING');
-        }
-        else if (!isCalibratingProp && liftState === 'CALIBRATING') {
+            console.log('[UI] State: -> CALIBRATING');
+        } else if (!isCalibratingProp && liftState === 'CALIBRATING') {
             setLiftState('IDLE');
-            console.log('[UI] State: CALIBRATING → IDLE');
+            console.log('[UI] State: CALIBRATING -> IDLE');
         }
     }, [liftState, isCalibratingProp]);
 
     if (!data) {
         return (
             <View style={styles.container}>
-                <Text style={styles.noDataText}>No sensor data available</Text>
-                <Text style={styles.hintText}>Press "Stream On" to start</Text>
+                <Text style={styles.noDataText}>No hay datos del sensor</Text>
+                <Text style={styles.hintText}>Pulsa "Iniciar stream" para empezar</Text>
             </View>
         );
     }
@@ -45,29 +41,26 @@ export function SensorDataCard({ data, isCalibrating: isCalibratingProp, traject
         <View style={styles.container}>
             <View style={styles.headerRow}>
                 <Text style={styles.title}>
-                    {isCalibrating ? '⚙️ CALIBRATING...' : '🔧 Sensor Monitor'}
+                    {isCalibrating ? 'CALIBRANDO...' : 'Monitor del sensor'}
                 </Text>
             </View>
 
             <Text style={styles.hintText}>
-                {isCalibrating ? 'Stay perfectly still while we calculate sensor biases' : 'Sensor streaming and calibrated'}
+                {isCalibrating ? 'Manten el sensor quieto mientras calculamos los bias' : 'Sensor en stream y calibrado'}
             </Text>
 
-            {/* Show orientation visualization when not calibrating */}
             {!isCalibrating && (
                 <View style={styles.vizWrapper}>
                     <OrientationViz q={trajectoryService.getOrientation()} />
                 </View>
             )}
 
-            {/* Raw sensor data display for debugging */}
             <View style={styles.rawDataContainer}>
-                <Text style={styles.rawDataTitle}>Raw Sensor Data</Text>
+                <Text style={styles.rawDataTitle}>Datos RAW del sensor</Text>
                 <Text style={styles.rawDataText}>Accel: [{data.ax.toFixed(3)}, {data.ay.toFixed(3)}, {data.az.toFixed(3)}] g</Text>
                 <Text style={styles.rawDataText}>Gyro: [{data.gx.toFixed(1)}, {data.gy.toFixed(1)}, {data.gz.toFixed(1)}] dps</Text>
             </View>
 
-            {/* Trajectory Graph (Post-Processed) */}
             <TrajectoryGraph path={trajectoryPath ?? trajectoryService.getPath()} />
         </View>
     );
