@@ -38,7 +38,9 @@ const trajectoryService = new TrajectoryService();
 // DOM Elements
 const fileInput = document.getElementById('file-upload') as HTMLInputElement;
 const resetBtn = document.getElementById('reset-btn') as HTMLButtonElement;
+const vmpLabelEl = document.getElementById('vmp-label') as HTMLElement;
 const vmpEl = document.getElementById('vmp-value') as HTMLElement;
+const vmpNoteEl = document.getElementById('vmp-note') as HTMLElement;
 const accPeakEl = document.getElementById('acc-peak') as HTMLElement;
 const heightPeakEl = document.getElementById('height-peak') as HTMLElement;
 const lateralMaxEl = document.getElementById('lateral-max') as HTMLElement;
@@ -138,7 +140,9 @@ function resetCharts() {
 }
 
 function resetMetrics() {
+    vmpLabelEl.innerText = 'V. Media Propulsiva';
     vmpEl.innerText = '---';
+    vmpNoteEl.innerText = '---';
     accPeakEl.innerText = '---';
     heightPeakEl.innerText = '---';
     lateralMaxEl.innerText = '---';
@@ -193,6 +197,7 @@ function renderRepAnalysis(analysis: SessionAnalysisSummary | null, isLegacy = f
         <p><strong>repCount:</strong> ${repAnalysis.repCount}</p>
         <p><strong>meanPeakVerticalVelocity:</strong> ${meanPeakVz.toFixed(3)} m/s</p>
         <p><strong>seriesMeanPropulsiveVelocity:</strong> ${repAnalysis.seriesMeanPropulsiveVelocity.toFixed(3)} m/s</p>
+        <p><strong>velocityUse:</strong> local por rep; interpretar como comparativa interna, no como velocidad absoluta garantizada.</p>
         <p><strong>bestRepIndex:</strong> ${repAnalysis.bestRepIndex ?? '--'}</p>
     `;
 
@@ -401,7 +406,9 @@ function updateMetricsFromRaw(rawData: any[]) {
         if (index === rawData.length - 1) finalLateral = lateral;
     });
 
+    vmpLabelEl.innerText = 'Velocidad no disponible';
     vmpEl.innerText = '0.00';
+    vmpNoteEl.innerText = 'Legacy: este archivo no permite reinterpretar la velocidad.';
     accPeakEl.innerText = maxAcc.toFixed(2);
     heightPeakEl.innerText = Number.isFinite(maxZ) ? maxZ.toFixed(2) : '0.00';
     lateralMaxEl.innerText = maxLateral.toFixed(2);
@@ -467,7 +474,19 @@ function processData() {
 
 function updateMetrics(analysis: SessionAnalysisSummary) {
     const metrics = analysis.movementMetrics;
+    const velocityLabel = metrics.velocityBasis === 'rep-local'
+        ? 'Velocidad local por rep'
+        : metrics.velocityBasis === 'session-global'
+            ? 'Velocidad global integrada'
+            : 'Velocidad no disponible';
+    vmpLabelEl.innerText = velocityLabel;
     vmpEl.innerText = metrics.meanPropulsiveVelocity.toFixed(2);
+    vmpNoteEl.innerText = [
+        `confidence: ${analysis.diagnostics.metricConfidence.velocity}`,
+        `base: ${metrics.velocityBasis}`,
+        `global: ${metrics.globalMeanPropulsiveVelocity.toFixed(2)} m/s`,
+        `local: ${metrics.localMeanPropulsiveVelocity.toFixed(2)} m/s`,
+    ].join(' | ');
     accPeakEl.innerText = metrics.peakLinearAcc.toFixed(2);
     heightPeakEl.innerText = metrics.maxHeight.toFixed(2);
     lateralMaxEl.innerText = metrics.maxLateral.toFixed(2);
@@ -490,6 +509,7 @@ function updateMeta(analysis: SessionAnalysisSummary, captureStats: CaptureHealt
         <p><strong>Avg Rate:</strong> ${rate.toFixed(0)} Hz</p>
         <p><strong>Active:</strong> ${activeDuration.toFixed(2)}s</p>
         <p><strong>ODR Config:</strong> ${SENSOR_CONFIG.ODR_HZ} Hz</p>
+        <p><strong>Timebase:</strong> ${captureStats.timebaseConfidence} | tick cfg ${captureStats.configuredTickUs.toFixed(3)} us | tick obs ${captureStats.effectiveTickUs?.toFixed(3) ?? '--'} us</p>
     `;
 
     if (!movementSegment) {
@@ -510,6 +530,7 @@ function updateMeta(analysis: SessionAnalysisSummary, captureStats: CaptureHealt
         <p><strong>End reason:</strong> ${movementSegment.endReason}</p>
         <p><strong>Confidence:</strong> ${movementSegment.confidence}</p>
         <p><strong>Residual speed at cutoff:</strong> ${analysis.movementMetrics.residualSpeedAtEnd.toFixed(3)} m/s</p>
+        <p><strong>Velocity basis:</strong> ${analysis.movementMetrics.velocityBasis} | <strong>Velocity confidence:</strong> ${analysis.movementMetrics.velocityConfidence}</p>
         <p><strong>Active end:</strong> ${activeEnd ? formatVector(activeEnd.x, activeEnd.y, activeEnd.z) : '--'}</p>
         <p><strong>Settled end:</strong> ${settledEnd ? formatVector(settledEnd.x, settledEnd.y, settledEnd.z) : '--'}</p>
     `;
@@ -733,7 +754,8 @@ function updateGeometryDiagnostics(
         ${metrics ? `<p><strong>Residual speed at cutoff:</strong> ${metrics.residualSpeedAtEnd.toFixed(3)} m/s</p>` : ''}
         <p><strong>Final lateral |XY|:</strong> ${fmt(Math.hypot(end.x, end.y))} m</p>
         ${diagnostics ? `<p><strong>barAxis confidence:</strong> ${diagnostics.barAxisConfidence}</p>` : ''}
-        ${diagnostics?.effectiveTickUs ? `<p><strong>effectiveTickUs:</strong> ${diagnostics.effectiveTickUs.toFixed(2)} us</p>` : ''}
+        ${diagnostics?.effectiveTickUs ? `<p><strong>sampleIntervalUs:</strong> ${diagnostics.effectiveTickUs.toFixed(2)} us | <strong>observedTickUs:</strong> ${diagnostics.observedTickUs?.toFixed(3) ?? '--'} us</p>` : ''}
+        ${diagnostics ? `<p><strong>Metric confidence:</strong> vel ${diagnostics.metricConfidence.velocity}, h ${diagnostics.metricConfidence.height}, lat ${diagnostics.metricConfidence.lateral}, acc ${diagnostics.metricConfidence.acceleration}</p>` : ''}
         ${captureStats ? `<p><strong>missingPackets:</strong> ${captureStats.missingPackets} | <strong>missingSamples:</strong> ${captureStats.estimatedMissingSamples}</p>` : ''}
     `;
     analysisNoteEl.innerText = 'La trayectoria mostrada es la reconstruccion activa estabilizada basada solo en IMU; la posicion asentada final se reporta aparte. Z se presenta como vertical mundo y el yaw puede derivar.';
@@ -757,9 +779,11 @@ function updateAlgorithmLimits(analysis: SessionAnalysisSummary | null, captureS
     algorithmLimitsEl.innerHTML = `
         <p><strong>Confiable ahora:</strong> forma vertical del gesto, inicio/fin aproximado del movimiento y altura relativa en levantamientos estructurados.</p>
         <p><strong>Solo cualitativo:</strong> yaw absoluto, lateral durante giro de manga y trayectoria 3D absoluta.</p>
-        <p><strong>Baja confianza:</strong> cuando la velocidad residual al corte es alta, falta reposo inicial/final o el eje de barra no se detecta con claridad.</p>
+        <p><strong>Velocidad que mostramos:</strong> ${analysis.movementMetrics.velocityBasis === 'rep-local' ? 'local por rep' : analysis.movementMetrics.velocityBasis === 'session-global' ? 'global integrada' : 'no disponible'}.</p>
+        <p><strong>Baja confianza:</strong> cuando la velocidad residual al corte es alta, la base temporal no cuadra o la trayectoria vertical se degrada.</p>
         <p><strong>Estado de esta sesion:</strong> ${lowConfidence ? 'baja o media confianza' : 'confianza razonable'}.</p>
-        <p><strong>Residual speed:</strong> ${analysis.movementMetrics.residualSpeedAtEnd.toFixed(3)} m/s | <strong>barAxis:</strong> ${analysis.diagnostics.barAxisConfidence}</p>
+        <p><strong>Residual speed:</strong> ${analysis.movementMetrics.residualSpeedAtEnd.toFixed(3)} m/s | <strong>barAxis:</strong> ${analysis.diagnostics.barAxisConfidence} | <strong>timebase:</strong> ${captureStats?.timebaseConfidence ?? analysis.diagnostics.timebaseConfidence}</p>
+        <p><strong>Confidence by metric:</strong> vel ${analysis.diagnostics.metricConfidence.velocity}, h ${analysis.diagnostics.metricConfidence.height}, lat ${analysis.diagnostics.metricConfidence.lateral}, acc ${analysis.diagnostics.metricConfidence.acceleration}, reps ${analysis.diagnostics.metricConfidence.repCount}</p>
         <p><strong>Techo IMU-only:</strong> describe bien el gesto, pero no equivale a un registro absoluto tipo dron sin sensores auxiliares.</p>
     `;
 }

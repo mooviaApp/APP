@@ -7,6 +7,27 @@ import {
 
 const GAP_THRESHOLD_MS = 4;
 
+function classifyTimebaseConfidence(
+    avgRateHz: number,
+    expectedHz: number,
+    observedTickUs: number | null,
+): 'high' | 'medium' | 'low' {
+    const rateError = expectedHz > 0
+        ? Math.abs(avgRateHz - expectedHz) / expectedHz
+        : 1;
+    const tickError = observedTickUs === null
+        ? 1
+        : Math.abs(observedTickUs - SENSOR_CONFIG.TIMESTAMP_TICK_US) / SENSOR_CONFIG.TIMESTAMP_TICK_US;
+
+    if (rateError <= 0.03 && tickError <= 0.03) {
+        return 'high';
+    }
+    if (rateError <= 0.12 && tickError <= 0.08) {
+        return 'medium';
+    }
+    return 'low';
+}
+
 function deltaTicks16(prev: number, curr: number) {
     return (curr - prev + 0x10000) & 0xFFFF;
 }
@@ -89,6 +110,9 @@ export function analyzeCaptureHealth(
             reorderedPackets,
             durationMs: 0,
             effectiveTickUs,
+            configuredTickUs: SENSOR_CONFIG.TIMESTAMP_TICK_US,
+            configuredSampleIntervalUs: expectedHz > 0 ? 1_000_000 / expectedHz : 0,
+            timebaseConfidence: 'low',
         };
     }
 
@@ -126,6 +150,8 @@ export function analyzeCaptureHealth(
         effectiveTickUs = expectedSampleIntervalUs / medianTickDelta;
     }
 
+    const timebaseConfidence = classifyTimebaseConfidence(avgRateHz, expectedHz, effectiveTickUs);
+
     return {
         avgRateHz,
         medianDtMs,
@@ -141,5 +167,8 @@ export function analyzeCaptureHealth(
         reorderedPackets,
         durationMs,
         effectiveTickUs,
+        configuredTickUs: SENSOR_CONFIG.TIMESTAMP_TICK_US,
+        configuredSampleIntervalUs: expectedHz > 0 ? 1_000_000 / expectedHz : 0,
+        timebaseConfidence,
     };
 }

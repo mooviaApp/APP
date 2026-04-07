@@ -34,9 +34,11 @@
 
 import {
     IMUSample,
+    MetricConfidenceSummary,
     MovementSegment,
     RepAnalysisSummary,
     RepetitionSummary,
+    SENSOR_CONFIG,
     SessionAnalysisDiagnostics,
     SessionEndPoint,
     SessionAnalysisSummary,
@@ -691,6 +693,7 @@ export class TrajectoryService {
             q: { ...this.q },
             p_raw: { ...this.p },
             v_raw: { ...this.v },
+            hwTs16: sample.hwTs16,
             isStationary: isStat,
             linAccMag,
             gyroMagDps: w_mag * (180 / Math.PI),
@@ -922,6 +925,11 @@ export class TrajectoryService {
         return {
             peakLinearAcc: 0,
             meanPropulsiveVelocity: 0,
+            globalMeanPropulsiveVelocity: 0,
+            localMeanPropulsiveVelocity: 0,
+            meanPeakRepVelocity: 0,
+            velocityBasis: 'unavailable',
+            velocityConfidence: 'low',
             maxHeight: 0,
             finalHeight: 0,
             maxLateral: 0,
@@ -953,6 +961,18 @@ export class TrajectoryService {
         return {
             barAxisConfidence: this.barAxisConfidence,
             effectiveTickUs: null,
+            observedTickUs: null,
+            configuredTickUs: SENSOR_CONFIG.TIMESTAMP_TICK_US,
+            configuredSampleIntervalUs: 1_000_000 / SENSOR_CONFIG.ODR_HZ,
+            timebaseConfidence: 'low',
+            metricConfidence: {
+                velocity: 'low',
+                height: 'low',
+                lateral: 'low',
+                acceleration: 'low',
+                repCount: 'low',
+                timebase: 'low',
+            },
         };
     }
 
@@ -986,7 +1006,7 @@ export class TrajectoryService {
         return (end.timestamp - start.timestamp) + (end.dtMs ?? 0);
     }
 
-    private estimateEffectiveTickUsFromRecords(records: TrajectoryRecord[]): number | null {
+    private estimateSampleIntervalUsFromRecords(records: TrajectoryRecord[]): number | null {
         const dtUs = records
             .map((record) => record.dtMs ?? 0)
             .filter((dtMs) => dtMs > 0 && dtMs < 10)
@@ -998,6 +1018,70 @@ export class TrajectoryService {
         return sorted.length % 2 === 0
             ? (sorted[mid - 1] + sorted[mid]) / 2
             : sorted[mid];
+    }
+
+    private deltaTicks16(prev: number, curr: number): number {
+        return (curr - prev + 0x10000) & 0xFFFF;
+    }
+
+    private estimateObservedTickUsFromRecords(records: TrajectoryRecord[]): number | null {
+        const tickUs: number[] = [];
+        for (let i = 1; i < records.length; i++) {
+            const prev = records[i - 1].hwTs16;
+            const curr = records[i].hwTs16;
+            const dtMs = records[i].dtMs ?? 0;
+            if (typeof prev !== 'number' || typeof curr !== 'number' || dtMs <= 0 || dtMs >= 10) {
+                continue;
+            }
+            const deltaTicks = this.deltaTicks16(prev, curr);
+            if (deltaTicks <= 0) continue;
+            tickUs.push((dtMs * 1000) / deltaTicks);
+        }
+
+        if (tickUs.length === 0) return null;
+        const sorted = tickUs.sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0
+            ? (sorted[mid - 1] + sorted[mid]) / 2
+            : sorted[mid];
+    }
+
+    private rankConfidence(level: 'high' | 'medium' | 'low'): number {
+        switch (level) {
+            case 'high':
+                return 2;
+            case 'medium':
+                return 1;
+            default:
+                return 0;
+        }
+    }
+
+    private minConfidence(...levels: Array<'high' | 'medium' | 'low'>): 'high' | 'medium' | 'low' {
+        return levels.reduce((lowest, current) => (
+            this.rankConfidence(current) < this.rankConfidence(lowest) ? current : lowest
+        ), 'high' as const);
+    }
+
+    private buildTimebaseConfidence(
+        sampleIntervalUs: number | null,
+        observedTickUs: number | null,
+    ): 'high' | 'medium' | 'low' {
+        const configuredSampleIntervalUs = 1_000_000 / SENSOR_CONFIG.ODR_HZ;
+        const sampleError = sampleIntervalUs === null
+            ? 1
+            : Math.abs(sampleIntervalUs - configuredSampleIntervalUs) / configuredSampleIntervalUs;
+        const tickError = observedTickUs === null
+            ? 1
+            : Math.abs(observedTickUs - SENSOR_CONFIG.TIMESTAMP_TICK_US) / SENSOR_CONFIG.TIMESTAMP_TICK_US;
+
+        if (sampleError <= 0.03 && tickError <= 0.03) {
+            return 'high';
+        }
+        if (sampleError <= 0.12 && tickError <= 0.08) {
+            return 'medium';
+        }
+        return 'low';
     }
 
     private buildEndPoint(timestamp: number, position: Vec3, baseline: Vec3): SessionEndPoint {
@@ -1972,9 +2056,15 @@ export class TrajectoryService {
 
         const activeEndLateral = Math.hypot(activeEndRelative.x, activeEndRelative.y);
         const settledEndLateral = Math.hypot(settledFinalRelative.x, settledFinalRelative.y);
+        const globalMeanPropulsiveVelocity = velocityCount > 0 ? sumVelocity / velocityCount : 0;
         return {
             peakLinearAcc,
-            meanPropulsiveVelocity: velocityCount > 0 ? sumVelocity / velocityCount : 0,
+            meanPropulsiveVelocity: globalMeanPropulsiveVelocity,
+            globalMeanPropulsiveVelocity,
+            localMeanPropulsiveVelocity: 0,
+            meanPeakRepVelocity: 0,
+            velocityBasis: globalMeanPropulsiveVelocity > 0 ? 'session-global' : 'unavailable',
+            velocityConfidence: 'low',
             maxHeight,
             finalHeight: settledFinalRelative.z,
             maxLateral,
@@ -1987,12 +2077,126 @@ export class TrajectoryService {
         };
     }
 
+    private enrichVelocityMetrics(
+        metrics: SessionMovementMetrics,
+        repAnalysis: RepAnalysisSummary,
+        timebaseConfidence: 'high' | 'medium' | 'low',
+    ): SessionMovementMetrics {
+        const repsWithVelocity = repAnalysis.reps.filter((rep) => rep.metrics.peakVerticalVelocity > this.MOVEMENT_VZ_THRESHOLD);
+        const highConfidenceReps = repsWithVelocity.filter((rep) => rep.confidence === 'high');
+        const sourceReps = highConfidenceReps.length > 0 ? highConfidenceReps : repsWithVelocity;
+
+        const localMeanPropulsiveVelocity = sourceReps.length > 0
+            ? sourceReps.reduce((sum, rep) => sum + rep.metrics.meanPropulsiveVelocity, 0) / sourceReps.length
+            : 0;
+        const meanPeakRepVelocity = sourceReps.length > 0
+            ? sourceReps.reduce((sum, rep) => sum + rep.metrics.peakVerticalVelocity, 0) / sourceReps.length
+            : 0;
+
+        let velocityBasis: SessionMovementMetrics['velocityBasis'] = 'unavailable';
+        let displayVelocity = 0;
+        if (localMeanPropulsiveVelocity > 0) {
+            velocityBasis = 'rep-local';
+            displayVelocity = localMeanPropulsiveVelocity;
+        } else if (metrics.globalMeanPropulsiveVelocity > 0) {
+            velocityBasis = 'session-global';
+            displayVelocity = metrics.globalMeanPropulsiveVelocity;
+        }
+
+        let velocityConfidence: SessionMovementMetrics['velocityConfidence'] = 'low';
+        if (velocityBasis === 'rep-local') {
+            velocityConfidence = sourceReps.length >= Math.max(1, Math.ceil(Math.max(repAnalysis.repCount, 1) / 2))
+                ? this.minConfidence(timebaseConfidence, repAnalysis.cycleConfidence === 'high' ? 'high' : 'medium')
+                : 'medium';
+        } else if (velocityBasis === 'session-global') {
+            velocityConfidence = this.minConfidence(
+                timebaseConfidence,
+                metrics.residualSpeedAtEnd <= 0.25 ? 'medium' : 'low',
+            );
+        }
+
+        return {
+            ...metrics,
+            meanPropulsiveVelocity: displayVelocity,
+            localMeanPropulsiveVelocity,
+            meanPeakRepVelocity,
+            velocityBasis,
+            velocityConfidence,
+        };
+    }
+
+    private buildMetricConfidenceSummary(
+        metrics: SessionMovementMetrics,
+        repAnalysis: RepAnalysisSummary,
+        timebaseConfidence: 'high' | 'medium' | 'low',
+    ): MetricConfidenceSummary {
+        const acceleration: MetricConfidenceSummary['acceleration'] = metrics.peakLinearAcc > 0 && metrics.peakLinearAcc <= 30
+            ? 'high'
+            : metrics.peakLinearAcc > 0 && metrics.peakLinearAcc <= 45
+                ? 'medium'
+                : 'low';
+
+        const heightMagnitude = Math.max(
+            Math.abs(metrics.maxHeight),
+            Math.abs(metrics.finalHeight),
+            Math.abs(metrics.activeEndHeight),
+            Math.abs(metrics.settledEndHeight),
+        );
+        const height: MetricConfidenceSummary['height'] = heightMagnitude <= 2.5 && metrics.residualSpeedAtEnd <= 0.25
+            ? 'high'
+            : heightMagnitude <= 5
+                ? 'medium'
+                : 'low';
+
+        const lateralMagnitude = Math.max(
+            Math.abs(metrics.maxLateral),
+            Math.abs(metrics.finalLateral),
+            Math.abs(metrics.activeEndLateral),
+            Math.abs(metrics.settledEndLateral),
+        );
+        const lateral: MetricConfidenceSummary['lateral'] = this.barAxisConfidence === 'high' && lateralMagnitude <= 0.5
+            ? 'high'
+            : lateralMagnitude <= 1.5
+                ? 'medium'
+                : 'low';
+
+        const repCount: MetricConfidenceSummary['repCount'] = repAnalysis.repCount > 0
+            ? repAnalysis.cycleConfidence
+            : repAnalysis.partialRep
+                ? 'medium'
+                : 'low';
+
+        return {
+            velocity: metrics.velocityConfidence,
+            height,
+            lateral,
+            acceleration,
+            repCount,
+            timebase: timebaseConfidence,
+        };
+    }
+
     private buildSessionAnalysis(): SessionAnalysisSummary {
         const emptyMetrics = this.getEmptyMetrics();
         const emptyRepAnalysis = this.getEmptyRepAnalysis();
+        const sampleIntervalUs = this.estimateSampleIntervalUsFromRecords(this.rawDataBuffer);
+        const observedTickUs = this.estimateObservedTickUsFromRecords(this.rawDataBuffer);
+        const timebaseConfidence = this.buildTimebaseConfidence(sampleIntervalUs, observedTickUs);
         const diagnostics: SessionAnalysisDiagnostics = {
             barAxisConfidence: this.barAxisConfidence,
-            effectiveTickUs: this.estimateEffectiveTickUsFromRecords(this.rawDataBuffer),
+            effectiveTickUs: sampleIntervalUs,
+            observedTickUs,
+            configuredTickUs: SENSOR_CONFIG.TIMESTAMP_TICK_US,
+            configuredSampleIntervalUs: 1_000_000 / SENSOR_CONFIG.ODR_HZ,
+            timebaseConfidence,
+            metricConfidence: {
+                velocity: 'low',
+                height: 'low',
+                lateral: 'low',
+                acceleration: 'low',
+                repCount: 'low',
+                timebase: timebaseConfidence,
+            },
         };
         if (this.rawDataBuffer.length === 0) {
             return {
@@ -2063,7 +2267,7 @@ export class TrajectoryService {
         const residualVelocity = quietTail.killApplied
             ? { x: 0, y: 0, z: 0, speed: 0 }
             : rawResidualVelocity;
-        const metrics = this.computeMovementMetrics(
+        const baseMetrics = this.computeMovementMetrics(
             activeRawData,
             activePath,
             activeEndPoint?.relativePosition ?? Vec3Math.zero(),
@@ -2079,6 +2283,8 @@ export class TrajectoryService {
         )
             ? trimmedRepAnalysis
             : repAnalysisCandidate;
+        const metrics = this.enrichVelocityMetrics(baseMetrics, repAnalysis, diagnostics.timebaseConfidence);
+        diagnostics.metricConfidence = this.buildMetricConfidenceSummary(metrics, repAnalysis, diagnostics.timebaseConfidence);
         const endReason: MovementSegment['endReason'] = confidence === 'fallback'
             ? 'fallback'
             : quietTail.killApplied

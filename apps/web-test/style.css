@@ -183,6 +183,13 @@ main {
   color: var(--text-muted);
 }
 
+.metric-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  min-height: 16px;
+}
+
 .value.primary { color: var(--primary); }
 .value.accent { color: var(--accent); }
 .value.secondary { color: var(--secondary); }

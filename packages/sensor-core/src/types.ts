@@ -79,6 +79,7 @@ export interface TrajectoryRecord {
     q: Quaternion;
     p_raw: Vec3;
     v_raw: Vec3;
+    hwTs16?: number;
     isStationary?: boolean;
     linAccMag?: number;
     gyroMagDps?: number;
@@ -114,6 +115,11 @@ export interface MovementSegment {
 export interface SessionMovementMetrics {
     peakLinearAcc: number;
     meanPropulsiveVelocity: number;
+    globalMeanPropulsiveVelocity: number;
+    localMeanPropulsiveVelocity: number;
+    meanPeakRepVelocity: number;
+    velocityBasis: 'rep-local' | 'session-global' | 'unavailable';
+    velocityConfidence: 'high' | 'medium' | 'low';
     maxHeight: number;
     finalHeight: number;
     maxLateral: number;
@@ -169,9 +175,23 @@ export interface RepAnalysisSummary {
     cycleConfidence: 'high' | 'medium' | 'low';
 }
 
+export interface MetricConfidenceSummary {
+    velocity: 'high' | 'medium' | 'low';
+    height: 'high' | 'medium' | 'low';
+    lateral: 'high' | 'medium' | 'low';
+    acceleration: 'high' | 'medium' | 'low';
+    repCount: 'high' | 'medium' | 'low';
+    timebase: 'high' | 'medium' | 'low';
+}
+
 export interface SessionAnalysisDiagnostics {
     barAxisConfidence: 'high' | 'low' | 'unavailable';
     effectiveTickUs: number | null;
+    observedTickUs: number | null;
+    configuredTickUs: number;
+    configuredSampleIntervalUs: number;
+    timebaseConfidence: 'high' | 'medium' | 'low';
+    metricConfidence: MetricConfidenceSummary;
 }
 
 export interface SessionAnalysisSummary {
@@ -200,6 +220,9 @@ export interface CaptureHealthStats {
     reorderedPackets: number;
     durationMs: number;
     effectiveTickUs: number | null;
+    configuredTickUs: number;
+    configuredSampleIntervalUs: number;
+    timebaseConfidence: 'high' | 'medium' | 'low';
 }
 
 export interface RawPacketRecord {

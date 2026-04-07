@@ -75,6 +75,13 @@ export function BLEDeviceScreen() {
     const meanPeakVerticalVelocity = repAnalysis && repAnalysis.reps.length > 0
         ? repAnalysis.reps.reduce((sum, rep) => sum + rep.metrics.peakVerticalVelocity, 0) / repAnalysis.reps.length
         : 0;
+    const velocityLabel = sessionAnalysis?.movementMetrics.velocityBasis === 'rep-local'
+        ? 'Velocidad local por rep'
+        : sessionAnalysis?.movementMetrics.velocityBasis === 'session-global'
+            ? 'Velocidad global integrada'
+            : 'Velocidad estimada';
+    const velocityConfidence = sessionAnalysis?.diagnostics.metricConfidence.velocity ?? 'low';
+    const timebaseConfidence = captureStats?.timebaseConfidence ?? sessionAnalysis?.diagnostics.timebaseConfidence ?? 'low';
 
     const handleStartStreaming = async () => {
         setFinalPath([]); // Clear previous graph
@@ -108,12 +115,12 @@ export function BLEDeviceScreen() {
             setCaptureStats(capStats);
             setSessionAnalysis(analysis);
 
-            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/s^2, VMP: ${vmp.toFixed(2)} m/s, Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
+            console.log(`[UI] Results -> Acc: ${peakAcc.toFixed(2)} m/s^2, Vel: ${vmp.toFixed(2)} m/s (${analysis.movementMetrics.velocityBasis}), Height: ${height.toFixed(2)} m, Lateral: ${lateral.toFixed(2)} m`);
 
             // DEBUG ALERT: Confirm data quantity to user
             Alert.alert(
                 "Resultados del Levantamiento",
-                `VMP: ${vmp.toFixed(2)} m/s\nAceleracion pico: ${peakAcc.toFixed(2)} m/s^2\nAltura maxima: ${height.toFixed(2)} m\nAltura asentada: ${analysis.movementMetrics.settledEndHeight.toFixed(2)} m\nLateral activa: ${analysis.movementMetrics.activeEndLateral.toFixed(2)} m\nLateral asentada: ${analysis.movementMetrics.settledEndLateral.toFixed(2)} m`
+                `Velocidad (${analysis.movementMetrics.velocityBasis}): ${vmp.toFixed(2)} m/s\nConfianza velocidad: ${analysis.diagnostics.metricConfidence.velocity}\nAceleracion pico: ${peakAcc.toFixed(2)} m/s^2\nAltura maxima: ${height.toFixed(2)} m\nAltura asentada: ${analysis.movementMetrics.settledEndHeight.toFixed(2)} m\nLateral activa: ${analysis.movementMetrics.activeEndLateral.toFixed(2)} m\nLateral asentada: ${analysis.movementMetrics.settledEndLateral.toFixed(2)} m`
             );
         } catch (e: any) {
             Alert.alert('Error', 'No se pudo detener el stream: ' + e.message);
@@ -330,11 +337,12 @@ export function BLEDeviceScreen() {
                             <View style={styles.resultsContainer}>
                                 {meanPropulsiveVelocity !== null && (
                                     <View style={[styles.metricCard, { borderColor: COLORS.success }]}>
-                                        <Text style={styles.metricLabel}>V. Media Propulsiva</Text>
+                                        <Text style={styles.metricLabel}>{velocityLabel}</Text>
                                         <Text style={[styles.metricValue, { color: COLORS.success }]}>
                                             {meanPropulsiveVelocity.toFixed(2)}
                                         </Text>
                                         <Text style={styles.metricUnit}>m/s</Text>
+                                        <Text style={styles.metricHint}>confianza {velocityConfidence} | timebase {timebaseConfidence}</Text>
                                     </View>
                                 )}
 
@@ -444,6 +452,22 @@ export function BLEDeviceScreen() {
                                     <Text style={styles.captureValue}>{sessionAnalysis.movementSegment.confidence}</Text>
                                 </View>
                                 <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>velocidad base</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.velocityBasis}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>velocidad global</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.globalMeanPropulsiveVelocity.toFixed(3)} m/s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>velocidad local</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.localMeanPropulsiveVelocity.toFixed(3)} m/s</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>confianza velocidad</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.diagnostics.metricConfidence.velocity}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>residual speed</Text>
                                     <Text style={styles.captureValue}>{sessionAnalysis.movementMetrics.residualSpeedAtEnd.toFixed(3)} m/s</Text>
                                 </View>
@@ -477,8 +501,16 @@ export function BLEDeviceScreen() {
                                     <Text style={styles.captureValue}>{sessionAnalysis.diagnostics.barAxisConfidence}</Text>
                                 </View>
                                 <View style={styles.captureRow}>
-                                    <Text style={styles.captureLabel}>effectiveTick</Text>
+                                    <Text style={styles.captureLabel}>sample interval</Text>
                                     <Text style={styles.captureValue}>{sessionAnalysis.diagnostics.effectiveTickUs ? `${sessionAnalysis.diagnostics.effectiveTickUs.toFixed(2)} us` : '--'}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>observed tick</Text>
+                                    <Text style={styles.captureValue}>{sessionAnalysis.diagnostics.observedTickUs ? `${sessionAnalysis.diagnostics.observedTickUs.toFixed(3)} us` : '--'}</Text>
+                                </View>
+                                <View style={styles.captureRow}>
+                                    <Text style={styles.captureLabel}>timebase confidence</Text>
+                                    <Text style={styles.captureValue}>{timebaseConfidence}</Text>
                                 </View>
                             </View>
                         )}
@@ -487,7 +519,7 @@ export function BLEDeviceScreen() {
                             <View style={styles.captureCard}>
                                 <Text style={styles.sectionTitle}>Repeticiones</Text>
                                 <Text style={styles.captureHint}>
-                                    El conteo se calcula offline sobre el tramo activo, usando ciclos locales en el eje Z.
+                                    El conteo se calcula offline sobre el tramo activo, usando ciclos locales en el eje Z. La velocidad por rep se interpreta como metrica local comparativa.
                                 </Text>
                                 <View style={styles.captureRow}>
                                     <Text style={styles.captureLabel}>reps completas</Text>
@@ -871,6 +903,11 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: COLORS.text,
         marginTop: 2,
+    },
+    metricHint: {
+        fontSize: 10,
+        color: COLORS.textMuted,
+        marginTop: 6,
     },
     captureCard: {
         backgroundColor: COLORS.card,

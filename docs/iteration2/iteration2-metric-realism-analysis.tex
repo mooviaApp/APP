@@ -1,0 +1,243 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\usepackage{longtable}
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\sisetup{output-decimal-marker={,}}
+
+\title{Analisis de realismo de metricas IMU-only}
+\author{MOOVIA Sensor Lab}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Resumen ejecutivo}
+Si, las metricas actuales \textbf{pueden mejorarse} y, sobre todo, \textbf{pueden interpretarse mucho mejor} de lo que hoy se hace en la UI. La conclusion principal de esta investigacion es que el cuello dominante ya no es BLE en los JSON V3/V4 seleccionados: en todos los casos analizados \texttt{missingPackets = 0}. El problema esta en la cadena \emph{decoder temporal -> trayectoria -> velocidad integrada -> metricas}.
+
+La situacion actual se puede resumir asi:
+\begin{itemize}[leftmargin=14pt]
+  \item \textbf{Utiles ya}: \texttt{peakLinearAcc} como indicador relativo de intensidad local y \texttt{repCount} cuando la sesion entra en uno de los patrones ya soportados por el detector.
+  \item \textbf{Mejorables por software}: la velocidad por rep, la altura por rep y la lectura de la velocidad de sesion, siempre que pasen a ser metricas \emph{locales} y con bandera de confianza.
+  \item \textbf{No prometibles como fisica absoluta con la IMU actual}: velocidad vertical absoluta, posicion 3D absoluta, lateral absoluta y yaw estable.
+\end{itemize}
+
+En otras palabras: si podemos hacer las metricas mas realistas, pero no convirtiendo la trayectoria actual en una verdad fisica absoluta. Lo correcto es redefinir que significan, separar metrica global de metrica local y anadir confianza explicita.
+
+\section{Contexto}
+Las pruebas consideradas en este informe son sesiones verticales reales, con el sensor aproximadamente mirando hacia arriba al inicio y con reposo antes y despues del gesto. Se reprocesaron con la logica actual de:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{C:\textbackslash MOOVIA\_APP\textbackslash APP\textbackslash packages\textbackslash sensor-core\textbackslash src\textbackslash dataDecoder.ts}
+  \item \texttt{C:\textbackslash MOOVIA\_APP\textbackslash APP\textbackslash packages\textbackslash sensor-core\textbackslash src\textbackslash TrajectoryService.ts}
+\end{itemize}
+
+JSONs usados:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{V3-moovia-session-1774637899200.json}
+  \item \texttt{V3-moovia-session-1774637821525.json}
+  \item \texttt{v4-5reps-moovia-session-1775503335652.json}
+  \item \texttt{v4-3reps-moovia-session-1775506305263.json}
+  \item \texttt{v4-4reps-moovia-session-1775576618527.json}
+\end{itemize}
+
+\section{Como se generan hoy las metricas}
+\subsection*{Decoder temporal}
+El export RAW guarda \texttt{timestampMs} por sample y tambien \texttt{hwTs16}. El decoder reconstruye los tiempos absolutos desde el timestamp hardware de 16 bits y usa:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{TIMESTAMP\_TICK\_US = 32/30 us}
+  \item anclaje por el ultimo sample del paquete
+  \item retropropagacion hacia atras dentro del paquete
+\end{itemize}
+
+Esto es importante porque la velocidad depende totalmente de la base temporal. Si la escala temporal esta ligeramente sesgada, la velocidad queda sesgada tambien.
+
+\subsection*{Metricas de sesion}
+Hoy las metricas del tramo activo se calculan de forma resumida asi:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{peakLinearAcc}: maximo de \texttt{linAccMag}
+  \item \texttt{meanPropulsiveVelocity}: media de muestras con \texttt{v\_raw.z > MOVEMENT\_VZ\_THRESHOLD}
+  \item \texttt{maxHeight}: maximo de la trayectoria relativa en Z
+  \item \texttt{finalHeight}: posicion asentada final relativa al baseline
+  \item \texttt{maxLateral/finalLateral}: norma XY de la trayectoria relativa
+\end{itemize}
+
+La debilidad principal es \texttt{v\_raw.z}: es una velocidad integrada sobre una trayectoria que ya arrastra drift vertical.
+
+\subsection*{Metricas por rep}
+Las metricas por rep salen del detector local de repeticiones:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{peakVerticalVelocity}
+  \item \texttt{meanPropulsiveVelocity}
+  \item \texttt{maxHeight}
+  \item \texttt{netHeight}
+  \item \texttt{maxLateral/finalLateral}
+\end{itemize}
+
+El problema es que esas metricas ya no salen de una velocidad vertical absoluta estabilizada, sino de una senal local que mezcla trayectoria detrendida, segmentacion por bloques y cierres heuristicos. Por eso el conteo puede ser correcto mientras la velocidad o la altura por rep siguen siendo irreales.
+
+\section{Lectura de los JSON seleccionados}
+\subsection*{Tabla comparativa}
+\footnotesize
+\begin{longtable}{p{4.1cm}rrrrrrrr}
+\toprule
+Archivo & AvgRate & MaxGap & PeakAcc & VMP sesion & MaxH & FinalH & MaxLat & Reps \\
+\midrule
+\endhead
+V3-1774637899200 & 1060,34 & 68 & 14,673 & 0,258 & 0,241 & 0,175 & 0,495 & 1 \\
+V3-1774637821525 & 1060,80 & 53 & 19,362 & 0,000 & 0,000 & -0,913 & 0,299 & 1 \\
+v4-5reps-1775503335652 & 1060,88 & 59 & 17,602 & 0,097 & 0,019 & -11,271 & 7,739 & 5 \\
+v4-3reps-1775506305263 & 1060,75 & 54 & 17,313 & 0,161 & 0,009 & -1,221 & 0,449 & 3 \\
+v4-4reps-1775576618527 & 1060,91 & 57 & 21,245 & 0,373 & 1,963 & -27,226 & 23,638 & 2 \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsection*{Lo que dicen estos datos}
+\begin{itemize}[leftmargin=14pt]
+  \item Los cinco archivos salen con \texttt{missingPackets = 0}. Por tanto BLE ya no explica las deformaciones principales.
+  \item El promedio temporal exportado cae de forma repetida en \SI{\sim1060}{Hz}, mientras que el dt mediano interno del pipeline esta alrededor de \SI{1,000}{ms}. Eso sugiere una \textbf{inconsistencia temporal observable} en el eje de tiempo exportado.
+  \item En \texttt{v4-5reps} el conteo ya da \texttt{5}, pero la sesion termina en \SI{-11,271}{m} y la lateral maxima llega a \SI{7,739}{m}. Es imposible leer esos valores como fisica real de la barra.
+  \item En \texttt{v4-4reps} el detector produce una rep con \texttt{maxHeight = 143,362 m}. Ese solo dato basta para concluir que la altura por rep no puede presentarse hoy como valor fisico real.
+  \item En \texttt{V3-1774637821525} la sesion dice \texttt{maxHeight = 0}, pero la unica rep detectada reporta \texttt{maxHeight = 2,208 m}. Esto muestra que distintas metricas estan usando referencias diferentes y que, por tanto, necesitan reinterpretacion y confianza.
+\end{itemize}
+
+\section{Diagnostico por metrica}
+\begin{tabularx}{\textwidth}{p{3.2cm} p{5.1cm} p{2.9cm} X}
+\toprule
+Metrica & Como nace hoy & Estado & Lectura recomendada hoy \\
+\midrule
+\texttt{peakLinearAcc} & Maximo de \texttt{linAccMag} tras quitar gravedad & Util con cautela & Buena como indicador relativo de intensidad local. No es la mas afectada por la deriva de posicion. \\
+\texttt{repCount} & Segmentacion hibrida por bloques/ciclos locales & Util con cautela & Puede usarse si la forma visual y los marcadores encajan con la sesion. Necesita validacion visual en patrones nuevos. \\
+\texttt{meanPropulsiveVelocity} (sesion) & Media de \texttt{v\_raw.z} positiva sobre el tramo activo & No presentar como valor fisico real & Hoy es mas una senal de tendencia que una velocidad fisica de la barra. Muy sensible a drift y a como se corta el tramo activo. \\
+\texttt{peakVerticalVelocity} (rep) & Maximo de velocidad vertical local dentro de la rep detectada & No presentar como valor fisico real & Puede servir como \emph{score} interno de la rep, pero no como velocidad real hasta estabilizar la base temporal y la definicion de fase propulsiva. \\
+\texttt{maxHeight/finalHeight} & Trayectoria relativa integrada en Z & Util con cautela & Solo tienen sentido relativo en sesiones limpias y con cierre final estable. En sesiones degradadas se vuelven claramente irreales. \\
+\texttt{maxLateral/finalLateral} & Norma XY de trayectoria relativa & No presentar como valor fisico real & Muy sensibles a yaw y deriva de orientacion. Deben leerse como ``cuanta deriva lateral ve el estimador'', no como desplazamiento lateral real. \\
+\bottomrule
+\end{tabularx}
+
+\section{Ejemplos concretos de metrica irreal}
+\subsection*{Velocidad}
+La velocidad es hoy la metrica mas fragil. Hay dos problemas distintos:
+\begin{enumerate}[leftmargin=16pt]
+  \item \textbf{Velocidad global integrada}: sale de \texttt{v\_raw.z} y hereda cualquier sesgo temporal o drift vertical.
+  \item \textbf{Velocidad local por rep}: es mas recuperable, pero aun mezcla segmentacion, detrending y cierres heuristicos.
+\end{enumerate}
+
+Ejemplos:
+\begin{itemize}[leftmargin=14pt]
+  \item En \texttt{v4-5reps} el conteo ya es bueno (\texttt{5 reps}), pero cuatro reps salen con \texttt{peakVerticalVelocity = 0} y \texttt{VMP = 0}. Esto no invalida el conteo, pero si invalida la lectura actual de velocidad como magnitud fisica fiable.
+  \item En \texttt{V3-1774637899200} la unica rep da \texttt{peakVerticalVelocity = 0,267 m/s} y \texttt{VMP = 0,162 m/s}; son valores plausibles, pero siguen dependiendo de un cierre local, no de una velocidad vertical absoluta estabilizada.
+\end{itemize}
+
+\subsection*{Altura}
+La altura muestra bien el problema de mezclar una rep visualmente correcta con una trayectoria global no cerrada:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{v4-4reps}: una rep con \texttt{maxHeight = 143,362 m} es un caso de imposibilidad fisica.
+  \item \texttt{v4-5reps}: la sesion completa dice \texttt{maxHeight = 0,019 m} y \texttt{finalHeight = -11,271 m}; eso revela colapso de la trayectoria global, aunque el contador de reps ya funcione.
+\end{itemize}
+
+\subsection*{Lateral}
+La lateral no esta gobernada por BLE, sino por la orientacion:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{v4-5reps}: \texttt{maxLateral = 7,739 m}
+  \item \texttt{v4-4reps}: \texttt{maxLateral = 23,638 m}
+\end{itemize}
+Esas cifras no son una medicion lateral de la barra. Son una medicion de cuanta deriva lateral acumulo el estimador.
+
+\section{Se puede mejorar o no}
+\subsection*{Si se puede mejorar}
+Hay bastante margen de mejora por software si redefinimos las metricas como \textbf{metricas locales y con confianza}:
+\begin{itemize}[leftmargin=14pt]
+  \item reinterpretar la velocidad como velocidad de fase propulsiva local, no como velocidad vertical global integrada;
+  \item calcular altura y lateral por rep respecto al baseline local de cada bloque, no respecto a la sesion global;
+  \item anadir \texttt{confidence} por metrica, no solo por rep;
+  \item ocultar o degradar metricas que salgan fuera de rango razonable.
+\end{itemize}
+
+\subsection*{Si, pero con limite}
+Tambien puede mejorarse bastante la lectura relativa de:
+\begin{itemize}[leftmargin=14pt]
+  \item altura por rep en sesiones estructuradas;
+  \item lateral relativa por rep como indicador de estabilidad del gesto;
+  \item velocidad local para comparar reps entre si dentro de la misma sesion.
+\end{itemize}
+
+\subsection*{No con esta IMU sola}
+No debe prometerse como objetivo de esta fase:
+\begin{itemize}[leftmargin=14pt]
+  \item velocidad 3D absoluta fiable;
+  \item posicion 3D absoluta;
+  \item yaw absoluto estable;
+  \item lateral absoluta de la barra.
+\end{itemize}
+
+Para romper ese techo hace falta cambiar la observabilidad del sistema: magnetometro bien calibrado y/o referencia externa de posicion.
+
+\section{Recomendaciones tecnicas}
+\begin{enumerate}[leftmargin=16pt]
+  \item \textbf{Revalidar la base temporal}. Hay una discrepancia visible entre el dt mediano interno y la tasa media derivada de los timestamps exportados. Antes de vender velocidad como fisica, hay que revisar \texttt{TIMESTAMP\_TICK\_US} y la reconstruccion temporal.
+  \item \textbf{Separar velocidad global de velocidad local}. La UI no deberia llamar ``velocidad'' a una sola cosa. Debe distinguir:
+  \begin{itemize}[leftmargin=14pt]
+    \item velocidad global integrada de sesion;
+    \item velocidad local de rep;
+    \item confianza de cada una.
+  \end{itemize}
+  \item \textbf{Redefinir la velocidad de referencia}. Para repeticiones, la metrica principal deberia ser una velocidad local de bloque/rep bien filtrada y acotada, no la velocidad vertical global integrada.
+  \item \textbf{Añadir confianza por metrica}. Una rep puede estar bien contada y, aun asi, tener velocidad o altura de baja confianza.
+  \item \textbf{No presentar valores fisicamente imposibles}. Si una altura sale en decenas o centenas de metros, la UI debe degradarla o marcarla como no fiable.
+  \item \textbf{Mantener claro el techo IMU-only}. Aunque mejoremos mucho la interpretacion, seguimos necesitando hardware auxiliar para yaw/posicion absolutos.
+\end{enumerate}
+
+\section{Implementacion aplicada en esta pasada}
+Tras este analisis se aplico una primera mejora de software, sin cambiar todavia el export RAW ni el modelo fisico base:
+\begin{itemize}[leftmargin=14pt]
+  \item la velocidad mostrada en UI deja de ser siempre la velocidad global integrada y pasa a priorizar una \textbf{velocidad local por rep} cuando hay reps validas;
+  \item la velocidad global integrada se conserva, pero queda como dato secundario de diagnostico;
+  \item se anade \textbf{confianza por metrica} para velocidad, altura, lateral, aceleracion, conteo de reps y eje temporal;
+  \item el diagnostico temporal ahora separa mejor:
+  \begin{itemize}[leftmargin=14pt]
+    \item intervalo medio entre samples,
+    \item tick observado a partir de \texttt{hwTs16},
+    \item tick configurado,
+    \item y confianza temporal.
+  \end{itemize}
+\end{itemize}
+
+Esta implementacion no resuelve todavia el realismo fisico completo de la velocidad, pero si corrige la interpretacion del producto: la velocidad principal debe leerse como \textbf{metrica local comparativa de repeticion} mientras la confianza no sea alta.
+
+\section*{Respuesta directa}
+\textbf{Si, las metricas pueden mejorarse.} Pero la mejora mas inmediata no es ``integrar mejor lo mismo'', sino \textbf{reinterpretar mejor lo que ya calculamos}.
+
+\textbf{Se pueden reinterpretar mejor ya}:
+\begin{itemize}[leftmargin=14pt]
+  \item \texttt{peakLinearAcc} como indicador de intensidad local;
+  \item \texttt{repCount} cuando la segmentacion coincide con la forma visual;
+  \item velocidad y altura por rep como metricas \emph{relativas} y con confianza.
+\end{itemize}
+
+\textbf{No pueden hacerse plenamente realistas con la IMU actual sola}:
+\begin{itemize}[leftmargin=14pt]
+  \item velocidad vertical absoluta de sesion;
+  \item posicion/altura absolutas estables en sesiones largas;
+  \item lateral absoluta;
+  \item yaw estable.
+\end{itemize}
+
+La conclusion operativa es favorable: \textbf{si merece la pena mejorar las metricas}, pero la siguiente iteracion debe centrarse en:
+\begin{itemize}[leftmargin=14pt]
+  \item redefinir velocidad como metrica local;
+  \item anadir confianza por metrica;
+  \item y revalidar el eje temporal antes de volver a presentar la velocidad como magnitud fisica.
+\end{itemize}
+
+\end{document}
