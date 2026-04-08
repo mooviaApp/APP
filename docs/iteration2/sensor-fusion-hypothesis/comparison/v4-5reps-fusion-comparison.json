@@ -1,0 +1,204 @@
+{
+  "simulated": true,
+  "sourceSession": "v4-5reps-moovia-session-1775503335652.json",
+  "models": {
+    "magnetometer": "MMC5983MA",
+    "inclinometer": "IIS2ICLX"
+  },
+  "baseline": {
+    "captureHealth": {
+      "avgRateHz": 1060.8781926213478,
+      "medianDtMs": 0.99951171875,
+      "maxDtMs": 1.00048828125,
+      "gapsPct": 0,
+      "maxGapMs": 59,
+      "totalPackets": 770,
+      "invalidPackets": 0,
+      "estimatedMissingSamples": 0,
+      "droppedPackets": 0,
+      "missingPackets": 0,
+      "duplicatePackets": 0,
+      "reorderedPackets": 0,
+      "durationMs": 10887.20654296875,
+      "effectiveTickUs": 1.0672358591248665,
+      "configuredTickUs": 1.0666666666666667,
+      "configuredSampleIntervalUs": 1000,
+      "timebaseConfidence": "medium"
+    },
+    "movementMetrics": {
+      "peakLinearAcc": 17.60224484000911,
+      "meanPropulsiveVelocity": 1.078561076086968,
+      "globalMeanPropulsiveVelocity": 0.0969402942042065,
+      "localMeanPropulsiveVelocity": 1.078561076086968,
+      "meanPeakRepVelocity": 1.377486184786231,
+      "velocityBasis": "rep-local",
+      "velocityConfidence": "medium",
+      "maxHeight": 0.018757710673889032,
+      "finalHeight": -11.271115390735421,
+      "maxLateral": 7.739003549809032,
+      "finalLateral": 7.739003549809032,
+      "activeEndHeight": -11.271115390735421,
+      "settledEndHeight": -11.271115390735421,
+      "activeEndLateral": 7.739003549809032,
+      "settledEndLateral": 7.739003549809032,
+      "residualSpeedAtEnd": 0
+    },
+    "repCount": 5,
+    "bestRepIndex": 1,
+    "repMetrics": [
+      {
+        "index": 1,
+        "direction": "down-first",
+        "durationMs": 1139.1396484375,
+        "meanPropulsiveVelocity": 1.078561076086968,
+        "peakVerticalVelocity": 1.377486184786231,
+        "maxHeight": 1.0061207489451123,
+        "netHeight": -1.0061207489451123,
+        "maxLateral": 0.4369244417114039
+      },
+      {
+        "index": 2,
+        "direction": "down-first",
+        "durationMs": 1124.13916015625,
+        "meanPropulsiveVelocity": 0,
+        "peakVerticalVelocity": 0,
+        "maxHeight": 2.365331812916171,
+        "netHeight": -2.365331812916171,
+        "maxLateral": 1.2965807261937292
+      },
+      {
+        "index": 3,
+        "direction": "down-first",
+        "durationMs": 968.94970703125,
+        "meanPropulsiveVelocity": 0,
+        "peakVerticalVelocity": 0,
+        "maxHeight": 2.4321812701232437,
+        "netHeight": -2.4321812701232437,
+        "maxLateral": 1.905796695172821
+      },
+      {
+        "index": 4,
+        "direction": "down-first",
+        "durationMs": 940.14013671875,
+        "meanPropulsiveVelocity": 0,
+        "peakVerticalVelocity": 0,
+        "maxHeight": 3.2784145936222533,
+        "netHeight": -3.2784145936222533,
+        "maxLateral": 2.5793422058051476
+      },
+      {
+        "index": 5,
+        "direction": "down-first",
+        "durationMs": 1433.32958984375,
+        "meanPropulsiveVelocity": 0,
+        "peakVerticalVelocity": 0,
+        "maxHeight": 7.148376037162944,
+        "netHeight": -7.148376037162944,
+        "maxLateral": 5.0277545114152415
+      }
+    ]
+  },
+  "simulatedInputs": {
+    "magnetometer": {
+      "odrHz": 200,
+      "sampleCount": 2178
+    },
+    "inclinometer": {
+      "odrHz": 208,
+      "sampleCount": 2266
+    }
+  },
+  "derivedSignals": {
+    "headingSamples": 2178,
+    "tiltSamples": 2266
+  },
+  "hypothesisFusion": {
+    "repWindowStartMs": 1775503214491.4194,
+    "repWindowEndMs": 1775503221434.4468,
+    "repCount": 5,
+    "meanLocalVerticalExcursionM": 0.33466213786521753,
+    "meanPeakVerticalVelocityMps": 0.9442291566335375,
+    "meanMaxLateralPerRepM": 0.06665077531788621,
+    "activeEndHeightM": 0.0031027842771322867,
+    "activeEndLateralM": 0.0005022083410013282,
+    "maxHeightM": 0.5366293884966126,
+    "minHeightM": -0.005857621681328359,
+    "maxLateralM": 0.09244022758262237,
+    "headingConfidence": 1,
+    "tiltConfidence": 1,
+    "lateralScale": 0.38,
+    "verticalScale": 0.8999999999999999,
+    "repMetrics": [
+      {
+        "index": 1,
+        "startTimeMs": 1775503214491.4194,
+        "endTimeMs": 1775503215794.749,
+        "durationMs": 1303.32958984375,
+        "localVerticalExcursionM": 0.31504015340399955,
+        "peakVerticalVelocityMps": 0.9483612125819052,
+        "meanPropulsiveVelocityMps": 0.45199597853553775,
+        "maxLateralM": 0.05654449465876057,
+        "netHeightM": -0.0010060102611287878,
+        "netLateralM": 0.00002655009558337306
+      },
+      {
+        "index": 2,
+        "startTimeMs": 1775503215794.749,
+        "endTimeMs": 1775503217046.0786,
+        "durationMs": 1251.32958984375,
+        "localVerticalExcursionM": 0.30715920750532555,
+        "peakVerticalVelocityMps": 0.8592222943715894,
+        "meanPropulsiveVelocityMps": 0.4828773242074973,
+        "maxLateralM": 0.06573561809501181,
+        "netHeightM": -0.00119983124422068,
+        "netLateralM": 0.00007877663442774774
+      },
+      {
+        "index": 3,
+        "startTimeMs": 1775503217046.0786,
+        "endTimeMs": 1775503218312.2178,
+        "durationMs": 1266.13916015625,
+        "localVerticalExcursionM": 0.22892176706815615,
+        "peakVerticalVelocityMps": 1.0641096459590924,
+        "meanPropulsiveVelocityMps": 0.4163349263049767,
+        "maxLateralM": 0.051143230414553424,
+        "netHeightM": -0.004073825039859002,
+        "netLateralM": 0.0007418651649486804
+      },
+      {
+        "index": 4,
+        "startTimeMs": 1775503218312.2178,
+        "endTimeMs": 1775503219618.7378,
+        "durationMs": 1306.52001953125,
+        "localVerticalExcursionM": 0.28802470684254333,
+        "peakVerticalVelocityMps": 1.0258190269317735,
+        "meanPropulsiveVelocityMps": 0.45395495456382995,
+        "maxLateralM": 0.0685424608191072,
+        "netHeightM": 0.0009085202837392596,
+        "netLateralM": 0.000022388087374506647
+      },
+      {
+        "index": 5,
+        "startTimeMs": 1775503219618.7378,
+        "endTimeMs": 1775503221434.4468,
+        "durationMs": 1815.708984375,
+        "localVerticalExcursionM": 0.5341648545060631,
+        "peakVerticalVelocityMps": 0.823633603323326,
+        "meanPropulsiveVelocityMps": 0.5588989615177704,
+        "maxLateralM": 0.09128807260199809,
+        "netHeightM": -0.0015470570063548113,
+        "netLateralM": 0.0006057689452602001
+      }
+    ]
+  },
+  "improvement": {
+    "repCountStable": true,
+    "activeEndHeightReductionPct": 99.97247136446067,
+    "activeEndLateralReductionPct": 99.99351068470548,
+    "interpretation": {
+      "yaw": "The simulated magnetometer offers a plausible low-drift heading reference.",
+      "tilt": "The simulated inclinometer offers a plausible low-drift gravity reference.",
+      "hardLimit": "This remains a hypothesis-level postprocessed fusion pass. It does not validate real hardware latency, calibration workflow or magnetic disturbance handling."
+    }
+  }
+}

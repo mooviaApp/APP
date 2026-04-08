@@ -20,9 +20,9 @@
         </div>
         <div class="actions">
           <label for="file-upload" class="btn btn-primary">
-            <span class="icon">Load</span> JSON
+            <span class="icon">Load</span> JSON(s)
           </label>
-          <input id="file-upload" type="file" accept=".json" style="display: none;" />
+          <input id="file-upload" type="file" accept=".json" multiple style="display: none;" />
           <button id="reset-btn" class="btn btn-secondary">Reset</button>
         </div>
       </nav>
@@ -208,6 +208,21 @@
               <div class="card plotter-card">
                 <h3>Trajectory 3D</h3>
                 <div id="trajectory-3d" class="plotly-container"></div>
+              </div>
+            </div>
+            <div class="card plotter-card mt-20">
+              <div class="card-heading">
+                <h3>Fusion Hypothesis</h3>
+                <div class="projection-switch">
+                  <button class="hypothesis-toggle-btn projection-btn active" data-hypothesis-view="fused">Fusion hypothesis</button>
+                  <button class="hypothesis-toggle-btn projection-btn" data-hypothesis-view="baseline">IMU-only baseline</button>
+                </div>
+              </div>
+              <p id="hypothesis-note" class="text-muted notice">
+                Load a comparison JSON and, optionally, the fused-path JSON to inspect the simulated sensor-fusion hypothesis inside this interface.
+              </p>
+              <div id="hypothesis-summary" class="meta-list analysis-list">
+                <p>No hypothesis loaded.</p>
               </div>
             </div>
             <div class="card plotter-card mt-20">

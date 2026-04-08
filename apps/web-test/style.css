@@ -336,6 +336,11 @@ td {
   color: var(--secondary);
 }
 
+.hypothesis-toggle-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .mt-20 { margin-top: 20px; }
 .scroll-hide::-webkit-scrollbar { display: none; }
 

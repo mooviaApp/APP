@@ -1,0 +1,198 @@
+{
+  "simulated": false,
+  "sourceSession": "v4-5reps-moovia-session-1775503335652.json",
+  "captureHealth": {
+    "avgRateHz": 1060.8781926213478,
+    "medianDtMs": 0.99951171875,
+    "maxDtMs": 1.00048828125,
+    "gapsPct": 0,
+    "maxGapMs": 59,
+    "totalPackets": 770,
+    "invalidPackets": 0,
+    "estimatedMissingSamples": 0,
+    "droppedPackets": 0,
+    "missingPackets": 0,
+    "duplicatePackets": 0,
+    "reorderedPackets": 0,
+    "durationMs": 10887.20654296875,
+    "effectiveTickUs": 1.0672358591248665,
+    "configuredTickUs": 1.0666666666666667,
+    "configuredSampleIntervalUs": 1000,
+    "timebaseConfidence": "medium"
+  },
+  "movementSegment": {
+    "startIndex": 3510,
+    "endIndex": 8702,
+    "startTimeMs": 1775503214491.4194,
+    "endTimeMs": 1775503219432.358,
+    "activeDurationMs": 4941.93896484375,
+    "initialIdleMs": 2660.84814453125,
+    "finalIdleMs": 0,
+    "trimmedTailMs": 1619.71044921875,
+    "endReason": "fallback",
+    "residualVelocityAtEnd": {
+      "x": 0,
+      "y": 0,
+      "z": 0,
+      "speed": 0
+    },
+    "confidence": "fallback"
+  },
+  "movementMetrics": {
+    "peakLinearAcc": 17.60224484000911,
+    "meanPropulsiveVelocity": 1.078561076086968,
+    "globalMeanPropulsiveVelocity": 0.0969402942042065,
+    "localMeanPropulsiveVelocity": 1.078561076086968,
+    "meanPeakRepVelocity": 1.377486184786231,
+    "velocityBasis": "rep-local",
+    "velocityConfidence": "medium",
+    "maxHeight": 0.018757710673889032,
+    "finalHeight": -11.271115390735421,
+    "maxLateral": 7.739003549809032,
+    "finalLateral": 7.739003549809032,
+    "activeEndHeight": -11.271115390735421,
+    "settledEndHeight": -11.271115390735421,
+    "activeEndLateral": 7.739003549809032,
+    "settledEndLateral": 7.739003549809032,
+    "residualSpeedAtEnd": 0
+  },
+  "repAnalysis": {
+    "repCount": 5,
+    "reps": [
+      {
+        "index": 1,
+        "startIndex": 3510,
+        "apexIndex": 4708,
+        "endIndex": 4708,
+        "startTimeMs": 1775503214491.4194,
+        "apexTimeMs": 1775503215630.559,
+        "endTimeMs": 1775503215630.559,
+        "durationMs": 1139.1396484375,
+        "direction": "down-first",
+        "completed": true,
+        "confidence": "high",
+        "metrics": {
+          "meanPropulsiveVelocity": 1.078561076086968,
+          "peakVerticalVelocity": 1.377486184786231,
+          "peakLinearAcc": 15.224256231187752,
+          "maxHeight": 1.0061207489451123,
+          "netHeight": -1.0061207489451123,
+          "maxLateral": 0.4369244417114039,
+          "finalLateral": 0.4369244417114039
+        }
+      },
+      {
+        "index": 2,
+        "startIndex": 4882,
+        "apexIndex": 6064,
+        "endIndex": 6064,
+        "startTimeMs": 1775503215794.749,
+        "apexTimeMs": 1775503216918.8882,
+        "endTimeMs": 1775503216918.8882,
+        "durationMs": 1124.13916015625,
+        "direction": "down-first",
+        "completed": true,
+        "confidence": "low",
+        "metrics": {
+          "meanPropulsiveVelocity": 0,
+          "peakVerticalVelocity": 0,
+          "peakLinearAcc": 16.17486470943445,
+          "maxHeight": 2.365331812916171,
+          "netHeight": -2.365331812916171,
+          "maxLateral": 1.2965807261937292,
+          "finalLateral": 1.2965807261937292
+        }
+      },
+      {
+        "index": 3,
+        "startIndex": 6202,
+        "apexIndex": 7219,
+        "endIndex": 7219,
+        "startTimeMs": 1775503217046.0786,
+        "apexTimeMs": 1775503218015.0283,
+        "endTimeMs": 1775503218015.0283,
+        "durationMs": 968.94970703125,
+        "direction": "down-first",
+        "completed": true,
+        "confidence": "low",
+        "metrics": {
+          "meanPropulsiveVelocity": 0,
+          "peakVerticalVelocity": 0,
+          "peakLinearAcc": 17.60224484000911,
+          "maxHeight": 2.4321812701232437,
+          "netHeight": -2.4321812701232437,
+          "maxLateral": 1.905796695172821,
+          "finalLateral": 1.905796695172821
+        }
+      },
+      {
+        "index": 4,
+        "startIndex": 7526,
+        "apexIndex": 8522,
+        "endIndex": 8522,
+        "startTimeMs": 1775503218312.2178,
+        "apexTimeMs": 1775503219252.358,
+        "endTimeMs": 1775503219252.358,
+        "durationMs": 940.14013671875,
+        "direction": "down-first",
+        "completed": true,
+        "confidence": "low",
+        "metrics": {
+          "meanPropulsiveVelocity": 0,
+          "peakVerticalVelocity": 0,
+          "peakLinearAcc": 17.12243472735615,
+          "maxHeight": 3.2784145936222533,
+          "netHeight": -3.2784145936222533,
+          "maxLateral": 2.5793422058051476,
+          "finalLateral": 2.5793422058051476
+        }
+      },
+      {
+        "index": 5,
+        "startIndex": 8909,
+        "apexIndex": 10410,
+        "endIndex": 10410,
+        "startTimeMs": 1775503219618.7378,
+        "apexTimeMs": 1775503221052.0674,
+        "endTimeMs": 1775503221052.0674,
+        "durationMs": 1433.32958984375,
+        "direction": "down-first",
+        "completed": true,
+        "confidence": "low",
+        "metrics": {
+          "meanPropulsiveVelocity": 0,
+          "peakVerticalVelocity": 0,
+          "peakLinearAcc": 15.955270278205619,
+          "maxHeight": 7.148376037162944,
+          "netHeight": -7.148376037162944,
+          "maxLateral": 5.0277545114152415,
+          "finalLateral": 5.0277545114152415
+        }
+      }
+    ],
+    "partialRep": null,
+    "seriesMeanPropulsiveVelocity": 0.2157122152173936,
+    "bestRepIndex": 1,
+    "detectionMode": "local-cycles",
+    "firstDirection": "down-first",
+    "detrendWindowMs": 700,
+    "detectedTurningPoints": 15,
+    "cycleConfidence": "high"
+  },
+  "diagnostics": {
+    "barAxisConfidence": "high",
+    "effectiveTickUs": 1000.48828125,
+    "observedTickUs": 1.066618636727079,
+    "configuredTickUs": 1.0666666666666667,
+    "configuredSampleIntervalUs": 1000,
+    "timebaseConfidence": "high",
+    "metricConfidence": {
+      "velocity": "medium",
+      "height": "low",
+      "lateral": "low",
+      "acceleration": "high",
+      "repCount": "high",
+      "timebase": "high"
+    }
+  }
+}

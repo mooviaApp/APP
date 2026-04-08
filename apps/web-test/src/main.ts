@@ -13,6 +13,7 @@ import {
 Chart.register(...registerables);
 
 type ProjectionMode = 'norm' | 'x' | 'y';
+type HypothesisViewMode = 'fused' | 'baseline';
 
 type PlotlyModule = {
     react: (element: HTMLElement, data: unknown[], layout: Record<string, unknown>, config?: Record<string, unknown>) => Promise<unknown>;
@@ -25,6 +26,232 @@ interface DisplayPoint {
     z: number;
 }
 
+interface HypothesisRepMetric {
+    index: number;
+    startTimeMs: number;
+    endTimeMs: number;
+    durationMs: number;
+    localVerticalExcursionM: number;
+    peakVerticalVelocityMps: number;
+    meanPropulsiveVelocityMps: number;
+    maxLateralM: number;
+    netHeightM: number;
+    netLateralM: number;
+}
+
+interface HypothesisBaselineRepMetric {
+    index: number;
+    direction: 'up-first' | 'down-first';
+    durationMs: number;
+    meanPropulsiveVelocity: number;
+    peakVerticalVelocity: number;
+    maxHeight: number;
+    netHeight: number;
+    maxLateral: number;
+}
+
+interface HypothesisComparisonFile {
+    simulated: true;
+    sourceSession: string;
+    models: {
+        magnetometer: string;
+        inclinometer: string;
+    };
+    baseline: {
+        captureHealth: CaptureHealthStats;
+        movementMetrics: {
+            peakLinearAcc: number;
+            meanPropulsiveVelocity: number;
+            globalMeanPropulsiveVelocity: number;
+            localMeanPropulsiveVelocity: number;
+            meanPeakRepVelocity: number;
+            velocityBasis: string;
+            velocityConfidence: string;
+            maxHeight: number;
+            finalHeight: number;
+            maxLateral: number;
+            finalLateral: number;
+            activeEndHeight: number;
+            settledEndHeight: number;
+            activeEndLateral: number;
+            settledEndLateral: number;
+            residualSpeedAtEnd: number;
+        };
+        repCount: number;
+        bestRepIndex: number | null;
+        repMetrics: HypothesisBaselineRepMetric[];
+    };
+    simulatedInputs: {
+        magnetometer: { odrHz: number; sampleCount: number };
+        inclinometer: { odrHz: number; sampleCount: number };
+    };
+    derivedSignals: {
+        headingSamples: number;
+        tiltSamples: number;
+    };
+    hypothesisFusion: {
+        repWindowStartMs: number;
+        repWindowEndMs: number;
+        repCount: number;
+        meanLocalVerticalExcursionM: number;
+        meanPeakVerticalVelocityMps: number;
+        meanMaxLateralPerRepM: number;
+        activeEndHeightM: number;
+        activeEndLateralM: number;
+        maxHeightM: number;
+        minHeightM: number;
+        maxLateralM: number;
+        headingConfidence: number;
+        tiltConfidence: number;
+        lateralScale: number;
+        verticalScale: number;
+        repMetrics: HypothesisRepMetric[];
+    };
+    improvement: {
+        repCountStable: boolean;
+        activeEndHeightReductionPct: number;
+        activeEndLateralReductionPct: number;
+        interpretation: {
+            yaw: string;
+            tilt: string;
+            hardLimit: string;
+        };
+    };
+}
+
+interface HypothesisPathAnchor {
+    label: string;
+    timeMs: number;
+    pathIndex: number;
+}
+
+interface HypothesisPathPoint extends DisplayPoint {
+    timestampMs: number;
+}
+
+interface HypothesisPathFile {
+    simulated: true;
+    sourceSession: string;
+    anchors: HypothesisPathAnchor[];
+    repWindowStartMs: number;
+    repWindowEndMs: number;
+    headingMeanConfidence: number;
+    tiltMeanConfidence: number;
+    lateralScale: number;
+    verticalScale: number;
+    path: HypothesisPathPoint[];
+}
+
+interface HypothesisBaselinePathRep {
+    index: number;
+    direction: 'up-first' | 'down-first';
+    startTimeMs: number;
+    apexTimeMs: number;
+    endTimeMs: number;
+    confidence: string;
+}
+
+interface HypothesisBaselinePathFile {
+    simulated: false;
+    sourceSession: string;
+    repWindowStartMs: number;
+    repWindowEndMs: number;
+    anchors: HypothesisPathAnchor[];
+    reps: HypothesisBaselinePathRep[];
+    path: HypothesisPathPoint[];
+}
+
+interface HypothesisBaselineFile {
+    simulated: false;
+    sourceSession: string;
+    captureHealth: CaptureHealthStats;
+    movementMetrics: {
+        peakLinearAcc: number;
+        meanPropulsiveVelocity: number;
+        maxHeight: number;
+        finalHeight: number;
+        maxLateral: number;
+        finalLateral: number;
+        activeEndHeight: number;
+        settledEndHeight: number;
+        activeEndLateral: number;
+        settledEndLateral: number;
+        residualSpeedAtEnd: number;
+    };
+    repAnalysis: {
+        repCount: number;
+        bestRepIndex: number | null;
+        reps: Array<{
+            index: number;
+            direction: 'up-first' | 'down-first';
+            durationMs: number;
+            confidence: string;
+            metrics: {
+                meanPropulsiveVelocity: number;
+                peakVerticalVelocity: number;
+                peakLinearAcc: number;
+                maxHeight: number;
+                netHeight: number;
+                maxLateral: number;
+                finalLateral: number;
+            };
+        }>;
+        partialRep: null | {
+            index: number;
+            direction: 'up-first' | 'down-first';
+            durationMs: number;
+            confidence: string;
+            metrics: {
+                meanPropulsiveVelocity: number;
+                peakVerticalVelocity: number;
+                peakLinearAcc: number;
+                maxHeight: number;
+                maxLateral: number;
+            };
+        };
+        detectionMode: string;
+        firstDirection: string | null;
+        detrendWindowMs: number;
+        detectedTurningPoints: number;
+        cycleConfidence: string;
+    };
+    diagnostics?: {
+        barAxisConfidence?: string;
+        effectiveTickUs?: number;
+        observedTickUs?: number;
+        timebaseConfidence?: string;
+        metricConfidence?: Record<string, string>;
+    };
+}
+
+interface SimulatedChipRawFile {
+    metadata: {
+        simulated: true;
+        sourceSession: string;
+        repScenario: string;
+        model: string;
+        odrHz: number;
+        axisConvention: string;
+        units: Record<string, string>;
+        assumptions: Record<string, unknown>;
+    };
+    samples: Array<Record<string, unknown> & { timestampMs: number; sampleIndex: number }>;
+}
+
+interface LoadedJsonFile {
+    name: string;
+    data: unknown;
+}
+
+interface HypothesisBundle {
+    comparison: HypothesisComparisonFile | null;
+    path: HypothesisPathFile | null;
+    baselinePath: HypothesisBaselinePathFile | null;
+    baseline: HypothesisBaselineFile | null;
+    chipFiles: SimulatedChipRawFile[];
+    loadedFileNames: string[];
+}
+
 // UI State
 let samples: IMUSample[] = [];
 let rawPackets: RawPacketRecord[] = [];
@@ -33,6 +260,8 @@ let currentProjection: ProjectionMode = 'norm';
 let currentPath: DisplayPoint[] = [];
 let plotlyPromise: Promise<PlotlyModule> | null = null;
 let plotlyRenderToken = 0;
+let currentHypothesisView: HypothesisViewMode = 'fused';
+let loadedHypothesisBundle: HypothesisBundle | null = null;
 const trajectoryService = new TrajectoryService();
 
 // DOM Elements
@@ -52,6 +281,9 @@ const processedNoteEl = document.getElementById('processed-note') as HTMLElement
 const analysisNoteEl = document.getElementById('analysis-note') as HTMLElement;
 const geometryMetaEl = document.getElementById('geometry-meta') as HTMLElement;
 const algorithmLimitsEl = document.getElementById('algorithm-limits') as HTMLElement;
+const hypothesisSummaryEl = document.getElementById('hypothesis-summary') as HTMLElement;
+const hypothesisNoteEl = document.getElementById('hypothesis-note') as HTMLElement;
+const hypothesisToggleButtons = Array.from(document.querySelectorAll('.hypothesis-toggle-btn')) as HTMLButtonElement[];
 const repSummaryEl = document.getElementById('rep-summary') as HTMLElement;
 const partialRepEl = document.getElementById('partial-rep') as HTMLElement;
 const repDebugEl = document.getElementById('rep-debug') as HTMLElement;
@@ -114,6 +346,53 @@ function getProjectionMeta(mode: ProjectionMode) {
     }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+
+function isHypothesisComparisonFile(value: unknown): value is HypothesisComparisonFile {
+    return isRecord(value)
+        && value.simulated === true
+        && isRecord(value.models)
+        && isRecord(value.hypothesisFusion)
+        && isRecord(value.baseline);
+}
+
+function isHypothesisPathFile(value: unknown): value is HypothesisPathFile {
+    return isRecord(value)
+        && value.simulated === true
+        && Array.isArray(value.path)
+        && Array.isArray(value.anchors);
+}
+
+function isHypothesisBaselinePathFile(value: unknown): value is HypothesisBaselinePathFile {
+    return isRecord(value)
+        && value.simulated === false
+        && Array.isArray(value.path)
+        && Array.isArray(value.anchors)
+        && Array.isArray(value.reps);
+}
+
+function isHypothesisBaselineFile(value: unknown): value is HypothesisBaselineFile {
+    return isRecord(value)
+        && value.simulated === false
+        && !Array.isArray(value.path)
+        && isRecord(value.captureHealth)
+        && isRecord(value.repAnalysis);
+}
+
+function isSimulatedChipRawFile(value: unknown): value is SimulatedChipRawFile {
+    return isRecord(value)
+        && isRecord(value.metadata)
+        && value.metadata.simulated === true
+        && typeof value.metadata.model === 'string'
+        && Array.isArray(value.samples);
+}
+
+function formatPercent(value: number) {
+    return `${value.toFixed(1)}%`;
+}
+
 function buildDisplayPath(analysis: SessionAnalysisSummary): DisplayPoint[] {
     const path = analysis.activePath.length > 0 ? analysis.activePath : analysis.fullPath;
     return path.map((point) => ({
@@ -154,6 +433,8 @@ function resetMetrics() {
     analysisNoteEl.innerText = 'La trayectoria 3D es una reconstruccion relativa basada solo en IMU; el yaw puede derivar.';
     geometryMetaEl.innerHTML = '<p>No data loaded</p>';
     algorithmLimitsEl.innerHTML = '<p>No data loaded</p>';
+    hypothesisSummaryEl.innerHTML = '<p>No hypothesis loaded.</p>';
+    hypothesisNoteEl.innerText = 'Load a comparison JSON and, optionally, the fused-path JSON to inspect the simulated sensor-fusion hypothesis inside this interface.';
     repSummaryEl.innerHTML = '<p>No repetition analysis yet.</p>';
     partialRepEl.innerHTML = '<p>No partial rep.</p>';
     repDebugEl.innerHTML = '<p>No rep debug yet.</p>';
@@ -161,6 +442,16 @@ function resetMetrics() {
     captureStatusEl.innerText = 'No data';
     Object.values(captureMetricsEl).forEach((element) => {
         element.innerText = '--';
+    });
+}
+
+function updateHypothesisToggleButtons() {
+    const hasBundle = !!loadedHypothesisBundle;
+    const hasBaselinePath = !!loadedHypothesisBundle?.baselinePath;
+    hypothesisToggleButtons.forEach((button) => {
+        const mode = button.dataset.hypothesisView as HypothesisViewMode;
+        button.classList.toggle('active', currentHypothesisView === mode);
+        button.disabled = !hasBundle || (mode === 'baseline' && !hasBaselinePath);
     });
 }
 
@@ -257,10 +548,13 @@ function clearDashboard() {
     samples = [];
     rawPackets = [];
     currentPath = [];
+    loadedHypothesisBundle = null;
+    currentHypothesisView = 'fused';
     currentProjection = 'norm';
     fileInput.value = '';
     trajectoryService.reset();
     updateProjectionButtons();
+    updateHypothesisToggleButtons();
     updatePath2dMetadata();
     resetMetrics();
     resetTables();
@@ -272,6 +566,7 @@ function clearDashboard() {
 function init() {
     setupTabs();
     setupProjectionControls();
+    setupHypothesisControls();
     setupResetButton();
     setupFileUpload();
     setupCharts();
@@ -303,6 +598,19 @@ function setupProjectionControls() {
     });
 }
 
+function setupHypothesisControls() {
+    hypothesisToggleButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            const requestedView = button.dataset.hypothesisView as HypothesisViewMode;
+            if (!loadedHypothesisBundle) return;
+            if (requestedView === 'baseline' && !loadedHypothesisBundle.baselinePath) return;
+            currentHypothesisView = requestedView;
+            updateHypothesisToggleButtons();
+            processHypothesisBundle(loadedHypothesisBundle);
+        });
+    });
+}
+
 function updateProjectionButtons() {
     projectionButtons.forEach((button) => {
         button.classList.toggle('active', button.dataset.projection === currentProjection);
@@ -327,41 +635,531 @@ function setupResetButton() {
     });
 }
 
-function setupFileUpload() {
-    fileInput.addEventListener('change', async (event) => {
-        const file = (event.target as HTMLInputElement).files?.[0];
-        if (!file) return;
-
+function readJsonFile(file: File): Promise<LoadedJsonFile> {
+    return new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = (loadEvent) => {
+        reader.onload = (event) => {
             try {
-                const text = loadEvent.target?.result as string;
-                const data = JSON.parse(text);
-
-                rawPackets = [];
-                if (Array.isArray(data)) {
-                    samples = data;
-                } else if (data.samples) {
-                    samples = data.samples;
-                    if (data.rawPackets) rawPackets = data.rawPackets;
-                } else if (data.rawData) {
-                    processRawTrajectory(data.rawData);
-                    return;
-                } else {
-                    throw new Error('Unsupported JSON format');
-                }
-
-                processData();
+                const text = event.target?.result as string;
+                resolve({ name: file.name, data: JSON.parse(text) });
             } catch (error) {
-                console.error('Error parsing JSON:', error);
-                alert('Invalid JSON file');
+                reject(error);
             }
         };
+        reader.onerror = () => reject(reader.error);
         reader.readAsText(file);
     });
 }
 
+function extractDisplayPath(pathFile: HypothesisPathFile): DisplayPoint[] {
+    return pathFile.path.map((point) => ({ x: point.x, y: point.y, z: point.z }));
+}
+
+function extractBaselineDisplayPath(pathFile: HypothesisBaselinePathFile): DisplayPoint[] {
+    return pathFile.path.map((point) => ({ x: point.x, y: point.y, z: point.z }));
+}
+
+function getActiveHypothesisPathFile(bundle: HypothesisBundle) {
+    if (currentHypothesisView === 'baseline' && bundle.baselinePath) {
+        return bundle.baselinePath;
+    }
+    return bundle.path;
+}
+
+function findClosestPathIndexByTime(path: HypothesisPathPoint[], timeMs: number) {
+    if (path.length === 0) return -1;
+    let bestIndex = 0;
+    let bestDistance = Math.abs(path[0].timestampMs - timeMs);
+    for (let index = 1; index < path.length; index += 1) {
+        const distance = Math.abs(path[index].timestampMs - timeMs);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = index;
+        }
+    }
+    return bestIndex;
+}
+
+function computePathDerivatives(path: HypothesisPathPoint[]) {
+    const velocities = path.map((point, index) => {
+        if (index === 0) {
+            return { x: 0, y: 0, z: 0 };
+        }
+        const previous = path[index - 1];
+        const dt = Math.max((point.timestampMs - previous.timestampMs) / 1000, 1e-6);
+        return {
+            x: (point.x - previous.x) / dt,
+            y: (point.y - previous.y) / dt,
+            z: (point.z - previous.z) / dt,
+        };
+    });
+
+    const accelerations = velocities.map((velocity, index) => {
+        if (index === 0) {
+            return { x: 0, y: 0, z: 0 };
+        }
+        const previousVelocity = velocities[index - 1];
+        const dt = Math.max((path[index].timestampMs - path[index - 1].timestampMs) / 1000, 1e-6);
+        return {
+            x: (velocity.x - previousVelocity.x) / dt,
+            y: (velocity.y - previousVelocity.y) / dt,
+            z: (velocity.z - previousVelocity.z) / dt,
+        };
+    });
+
+    return { velocities, accelerations };
+}
+
+function buildHypothesisMarkerIndexes(bundle: HypothesisBundle) {
+    if (!bundle.path || !bundle.comparison) {
+        return {
+            starts: [] as number[],
+            apexes: [] as number[],
+            ends: [] as number[],
+        };
+    }
+
+    const path = bundle.path.path;
+    const directions = new Map(bundle.comparison.baseline.repMetrics.map((rep) => [rep.index, rep.direction]));
+    const starts: number[] = [];
+    const apexes: number[] = [];
+    const ends: number[] = [];
+
+    bundle.comparison.hypothesisFusion.repMetrics.forEach((rep) => {
+        const startIndex = findClosestPathIndexByTime(path, rep.startTimeMs);
+        const endIndex = findClosestPathIndexByTime(path, rep.endTimeMs);
+        if (startIndex < 0 || endIndex < 0 || endIndex < startIndex) {
+            return;
+        }
+
+        starts.push(startIndex);
+        ends.push(endIndex);
+
+        const direction = directions.get(rep.index) ?? 'down-first';
+        let apexIndex = startIndex;
+        let apexValue = path[startIndex].z;
+        for (let index = startIndex; index <= endIndex; index += 1) {
+            const candidate = path[index].z;
+            const isBetter = direction === 'down-first'
+                ? candidate < apexValue
+                : candidate > apexValue;
+            if (isBetter) {
+                apexValue = candidate;
+                apexIndex = index;
+            }
+        }
+        apexes.push(apexIndex);
+    });
+
+    return { starts, apexes, ends };
+}
+
+function renderHypothesisSummary(bundle: HypothesisBundle) {
+    if (!bundle.comparison && !bundle.path && bundle.chipFiles.length === 0 && !bundle.baseline) {
+        hypothesisSummaryEl.innerHTML = '<p>No hypothesis loaded.</p>';
+        hypothesisNoteEl.innerText = 'Load a comparison JSON and, optionally, the fused-path JSON to inspect the simulated sensor-fusion hypothesis inside this interface.';
+        return;
+    }
+
+    const comparison = bundle.comparison;
+    const path = bundle.path;
+    const baselinePath = bundle.baselinePath;
+    const chipRows = bundle.chipFiles.map((file) => (
+        `<p><strong>${file.metadata.model}</strong>: ${file.samples.length} samples @ ${file.metadata.odrHz} Hz (${file.metadata.repScenario})</p>`
+    )).join('');
+
+    const summaryRows: string[] = [
+        '<p><strong>Mode:</strong> sensor-fusion hypothesis (simulated, not validated on hardware)</p>',
+        comparison ? `<p><strong>Source session:</strong> ${comparison.sourceSession}</p>` : '',
+        comparison ? `<p><strong>Models:</strong> ${comparison.models.magnetometer} + ${comparison.models.inclinometer}</p>` : '',
+        `<p><strong>Loaded files:</strong> ${bundle.loadedFileNames.join(', ')}</p>`,
+        path ? `<p><strong>Fused path points:</strong> ${path.path.length}</p>` : '<p><strong>Fused path:</strong> not loaded yet.</p>',
+        baselinePath ? `<p><strong>Baseline path points:</strong> ${baselinePath.path.length}</p>` : '<p><strong>Baseline path:</strong> load \\`v4-5reps-baseline-path.json\\` to enable the IMU-only toggle.</p>',
+        `<p><strong>Current view:</strong> ${currentHypothesisView === 'fused' ? 'Fusion hypothesis' : 'IMU-only baseline'}</p>`,
+        comparison ? `<p><strong>Baseline active-end height:</strong> ${comparison.baseline.movementMetrics.activeEndHeight.toFixed(3)} m -> <strong>Fused:</strong> ${comparison.hypothesisFusion.activeEndHeightM.toFixed(3)} m</p>` : '',
+        comparison ? `<p><strong>Baseline active-end lateral:</strong> ${comparison.baseline.movementMetrics.activeEndLateral.toFixed(3)} m -> <strong>Fused:</strong> ${comparison.hypothesisFusion.activeEndLateralM.toFixed(3)} m</p>` : '',
+        comparison ? `<p><strong>Rep count:</strong> ${comparison.baseline.repCount} -> ${comparison.hypothesisFusion.repCount}</p>` : '',
+        comparison ? `<p><strong>Mean peak rep velocity:</strong> ${comparison.hypothesisFusion.meanPeakVerticalVelocityMps.toFixed(3)} m/s</p>` : '',
+        comparison ? `<p><strong>Mean local vertical excursion:</strong> ${comparison.hypothesisFusion.meanLocalVerticalExcursionM.toFixed(3)} m</p>` : '',
+        comparison ? `<p><strong>Heading / tilt confidence:</strong> ${comparison.hypothesisFusion.headingConfidence.toFixed(2)} / ${comparison.hypothesisFusion.tiltConfidence.toFixed(2)}</p>` : '',
+        chipRows,
+    ].filter(Boolean);
+
+    hypothesisSummaryEl.innerHTML = summaryRows.join('');
+    hypothesisNoteEl.innerText = 'Hypothesis mode: the auxiliary sensors are simulated from the 5-rep session. Use the IMU-only / Fusion toggle to compare both views when the baseline-path artifact is loaded. This is an orientation tool for the next hardware iteration, not proof of real-world performance.';
+}
+
+function updateHypothesisTables(bundle: HypothesisBundle) {
+    const chipSummary = bundle.chipFiles.length > 0
+        ? bundle.chipFiles.map((file) => `${file.metadata.model}: ${file.samples.length} samples @ ${file.metadata.odrHz} Hz`).join(' | ')
+        : 'no auxiliary raw files loaded';
+
+    rawTableBody.innerHTML = `<tr><td colspan="9" style="text-align:center; padding:24px; color: var(--text-muted);">Hypothesis mode: raw IMU inspection is not the primary view here (${chipSummary}).</td></tr>`;
+    packetTableBody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:20px; color: var(--text-muted);">Hypothesis mode: packet timing remains anchored to the baseline session JSON.</td></tr>';
+}
+
+function updateHypothesisMetrics(bundle: HypothesisBundle) {
+    const comparison = bundle.comparison;
+    const baseline = bundle.baseline;
+
+    if (comparison && currentHypothesisView === 'fused') {
+        vmpLabelEl.innerText = 'Velocidad pico media (fusion)';
+        vmpEl.innerText = comparison.hypothesisFusion.meanPeakVerticalVelocityMps.toFixed(2);
+        vmpNoteEl.innerText = [
+            'simulada',
+            `baseline: ${comparison.baseline.movementMetrics.velocityBasis}`,
+            `heading ${comparison.hypothesisFusion.headingConfidence.toFixed(2)}`,
+            `tilt ${comparison.hypothesisFusion.tiltConfidence.toFixed(2)}`,
+        ].join(' | ');
+        accPeakEl.innerText = comparison.baseline.movementMetrics.peakLinearAcc.toFixed(2);
+        heightPeakEl.innerText = comparison.hypothesisFusion.maxHeightM.toFixed(2);
+        lateralMaxEl.innerText = comparison.hypothesisFusion.maxLateralM.toFixed(2);
+        lateralFinalEl.innerText = comparison.hypothesisFusion.activeEndLateralM.toFixed(2);
+        return;
+    }
+
+    if (baseline || comparison) {
+        const baselineMetrics = comparison?.baseline.movementMetrics ?? baseline?.movementMetrics;
+        if (!baselineMetrics) return;
+        vmpLabelEl.innerText = 'Velocidad local por rep';
+        vmpEl.innerText = baselineMetrics.meanPropulsiveVelocity.toFixed(2);
+        vmpNoteEl.innerText = currentHypothesisView === 'baseline'
+            ? 'IMU-only baseline view from the same 5-rep session'
+            : 'baseline hypothesis artifact without fused path comparison';
+        accPeakEl.innerText = baselineMetrics.peakLinearAcc.toFixed(2);
+        heightPeakEl.innerText = baselineMetrics.maxHeight.toFixed(2);
+        lateralMaxEl.innerText = baselineMetrics.maxLateral.toFixed(2);
+        lateralFinalEl.innerText = baselineMetrics.finalLateral.toFixed(2);
+        return;
+    }
+
+    vmpLabelEl.innerText = 'Velocidad no disponible';
+    vmpEl.innerText = '--';
+    vmpNoteEl.innerText = 'Load a hypothesis comparison JSON to view fused metrics.';
+    accPeakEl.innerText = '--';
+    heightPeakEl.innerText = '--';
+    lateralMaxEl.innerText = '--';
+    lateralFinalEl.innerText = '--';
+}
+
+function updateHypothesisMeta(bundle: HypothesisBundle) {
+    const comparison = bundle.comparison;
+    const baseline = bundle.baseline;
+    const path = getActiveHypothesisPathFile(bundle);
+    const captureStats = comparison?.baseline.captureHealth ?? baseline?.captureHealth ?? null;
+    const fusedPath = bundle.path;
+    const repWindowStart = comparison?.hypothesisFusion.repWindowStartMs ?? path?.repWindowStartMs ?? null;
+    const repWindowEnd = comparison?.hypothesisFusion.repWindowEndMs ?? path?.repWindowEndMs ?? null;
+    const headingConfidence = comparison
+        ? comparison.hypothesisFusion.headingConfidence.toFixed(2)
+        : fusedPath?.headingMeanConfidence?.toFixed(2) ?? '--';
+    const tiltConfidence = comparison
+        ? comparison.hypothesisFusion.tiltConfidence.toFixed(2)
+        : fusedPath?.tiltMeanConfidence?.toFixed(2) ?? '--';
+    const verticalScale = comparison?.hypothesisFusion.verticalScale?.toFixed(2) ?? fusedPath?.verticalScale?.toFixed(2) ?? '--';
+    const lateralScale = comparison?.hypothesisFusion.lateralScale?.toFixed(2) ?? fusedPath?.lateralScale?.toFixed(2) ?? '--';
+    const repWindowDuration = repWindowStart !== null && repWindowEnd !== null
+        ? Math.max(0, repWindowEnd - repWindowStart) / 1000
+        : null;
+
+    sessionMetaEl.innerHTML = `
+        <p><strong>Status:</strong> Hypothesis fusion package</p>
+        <p><strong>Source:</strong> ${comparison?.sourceSession ?? baseline?.sourceSession ?? path?.sourceSession ?? '--'}</p>
+        <p><strong>View:</strong> ${currentHypothesisView === 'fused' ? 'Fusion hypothesis' : 'IMU-only baseline'}</p>
+        <p><strong>Loaded:</strong> ${bundle.loadedFileNames.join(', ')}</p>
+        <p><strong>Selected path:</strong> ${path ? `${path.path.length} points` : 'not loaded'}</p>
+        <p><strong>Aux inputs:</strong> ${comparison ? `${comparison.simulatedInputs.magnetometer.sampleCount} mag / ${comparison.simulatedInputs.inclinometer.sampleCount} tilt` : `${bundle.chipFiles.length} raw chip file(s)`}</p>
+        <p><strong>Timebase:</strong> ${captureStats ? `${captureStats.timebaseConfidence} | tick cfg ${captureStats.configuredTickUs.toFixed(3)} us | tick obs ${captureStats.effectiveTickUs?.toFixed(3) ?? '--'} us` : 'baseline capture health not loaded'}</p>
+    `;
+
+    segmentMetaEl.innerHTML = `
+        <p><strong>Rep window:</strong> ${repWindowDuration !== null ? `${repWindowDuration.toFixed(2)} s` : 'not available'}</p>
+        <p><strong>Rep count:</strong> ${comparison ? `${comparison.baseline.repCount} -> ${comparison.hypothesisFusion.repCount}` : baseline?.repAnalysis.repCount ?? '--'}</p>
+        <p><strong>Heading confidence:</strong> ${headingConfidence}</p>
+        <p><strong>Tilt confidence:</strong> ${tiltConfidence}</p>
+        <p><strong>Vertical scale:</strong> ${verticalScale}</p>
+        <p><strong>Lateral scale:</strong> ${lateralScale}</p>
+    `;
+
+    segmentNoteEl.innerText = currentHypothesisView === 'fused'
+        ? 'Hypothesis mode: the rep window and fused trajectory come from simulated MMC5983MA + IIS2ICLX data aligned to the 5-rep session.'
+        : 'Baseline mode: this view replays the IMU-only path over the same rep window used by the hypothesis artifacts.';
+    processedNoteEl.innerText = currentHypothesisView === 'fused'
+        ? 'Hypothesis mode: processed charts are derived from the fused path preview, not from real auxiliary sensor hardware.'
+        : 'Baseline mode: processed charts show the IMU-only rep window so you can compare it directly against the fusion hypothesis.';
+}
+
+function renderHypothesisRepAnalysis(bundle: HypothesisBundle) {
+    if (!bundle.comparison) {
+        if (bundle.baseline) {
+            repSummaryEl.innerHTML = `<p><strong>repCount:</strong> ${bundle.baseline.repAnalysis.repCount}</p><p><strong>Mode:</strong> baseline-only artifact</p>`;
+            repDebugEl.innerHTML = `
+                <p><strong>detectionMode:</strong> ${bundle.baseline.repAnalysis.detectionMode}</p>
+                <p><strong>firstDirection:</strong> ${bundle.baseline.repAnalysis.firstDirection ?? '--'}</p>
+                <p><strong>turning points detected:</strong> ${bundle.baseline.repAnalysis.detectedTurningPoints}</p>
+                <p><strong>detrendWindowMs:</strong> ${bundle.baseline.repAnalysis.detrendWindowMs}</p>
+                <p><strong>cycleConfidence:</strong> ${bundle.baseline.repAnalysis.cycleConfidence}</p>
+            `;
+            repTableBody.innerHTML = bundle.baseline.repAnalysis.reps.map((rep) => `
+                <tr>
+                    <td>${rep.index}</td>
+                    <td>${formatDirection(rep.direction)}</td>
+                    <td>${(rep.durationMs / 1000).toFixed(2)}</td>
+                    <td>${rep.metrics.peakVerticalVelocity.toFixed(3)}</td>
+                    <td>${rep.metrics.meanPropulsiveVelocity.toFixed(3)}</td>
+                    <td>${rep.metrics.peakLinearAcc.toFixed(3)}</td>
+                    <td>${rep.metrics.maxHeight.toFixed(3)}</td>
+                    <td>${rep.metrics.maxLateral.toFixed(3)}</td>
+                    <td>${rep.confidence}</td>
+                </tr>
+            `).join('');
+            partialRepEl.innerHTML = bundle.baseline.repAnalysis.partialRep
+                ? `<p><strong>Partial rep:</strong> rep ${bundle.baseline.repAnalysis.partialRep.index}</p>`
+                : '<p><strong>Partial rep:</strong> none.</p>';
+            return;
+        }
+
+        repSummaryEl.innerHTML = '<p><strong>Status:</strong> load a hypothesis comparison JSON to inspect fused rep metrics.</p>';
+        repTableBody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 20px; color: var(--text-muted);">No fused rep comparison loaded</td></tr>';
+        partialRepEl.innerHTML = '<p><strong>Partial rep:</strong> not available.</p>';
+        repDebugEl.innerHTML = '<p><strong>Mode:</strong> no fused hypothesis comparison loaded.</p>';
+        return;
+    }
+
+    const comparison = bundle.comparison;
+    repSummaryEl.innerHTML = `
+        <p><strong>baseline repCount:</strong> ${comparison.baseline.repCount}</p>
+        <p><strong>fused repCount:</strong> ${comparison.hypothesisFusion.repCount}</p>
+        <p><strong>meanPeakVerticalVelocity:</strong> ${comparison.hypothesisFusion.meanPeakVerticalVelocityMps.toFixed(3)} m/s</p>
+        <p><strong>meanLocalVerticalExcursion:</strong> ${comparison.hypothesisFusion.meanLocalVerticalExcursionM.toFixed(3)} m</p>
+        <p><strong>meanMaxLateralPerRep:</strong> ${comparison.hypothesisFusion.meanMaxLateralPerRepM.toFixed(3)} m</p>
+        <p><strong>Interpretation:</strong> simulated auxiliary sensors help keep each rep local and bounded in the world frame.</p>
+    `;
+
+    repDebugEl.innerHTML = `
+        <p><strong>Mode:</strong> hypothesis fusion comparison</p>
+        <p><strong>Magnetometer:</strong> ${comparison.models.magnetometer} @ ${comparison.simulatedInputs.magnetometer.odrHz} Hz (${comparison.simulatedInputs.magnetometer.sampleCount} samples)</p>
+        <p><strong>Inclinometer:</strong> ${comparison.models.inclinometer} @ ${comparison.simulatedInputs.inclinometer.odrHz} Hz (${comparison.simulatedInputs.inclinometer.sampleCount} samples)</p>
+        <p><strong>Derived heading / tilt:</strong> ${comparison.derivedSignals.headingSamples} / ${comparison.derivedSignals.tiltSamples}</p>
+        <p><strong>Heading / tilt confidence:</strong> ${comparison.hypothesisFusion.headingConfidence.toFixed(2)} / ${comparison.hypothesisFusion.tiltConfidence.toFixed(2)}</p>
+        <p><strong>Improvement:</strong> active-end height ${formatPercent(comparison.improvement.activeEndHeightReductionPct)}, lateral ${formatPercent(comparison.improvement.activeEndLateralReductionPct)}</p>
+    `;
+
+    const baselineByIndex = new Map(comparison.baseline.repMetrics.map((rep) => [rep.index, rep]));
+    repTableBody.innerHTML = comparison.hypothesisFusion.repMetrics.map((rep) => {
+        const baselineRep = baselineByIndex.get(rep.index);
+        return `
+            <tr>
+                <td>${rep.index}</td>
+                <td>${baselineRep ? formatDirection(baselineRep.direction) : '--'}</td>
+                <td>${(rep.durationMs / 1000).toFixed(2)}</td>
+                <td>${rep.peakVerticalVelocityMps.toFixed(3)}</td>
+                <td>${rep.meanPropulsiveVelocityMps.toFixed(3)}</td>
+                <td>${baselineRep ? '--' : '--'}</td>
+                <td>${rep.localVerticalExcursionM.toFixed(3)}</td>
+                <td>${rep.maxLateralM.toFixed(3)}</td>
+                <td>simulated</td>
+            </tr>
+        `;
+    }).join('');
+
+    partialRepEl.innerHTML = '<p><strong>Partial rep:</strong> none in the simulated fused pass.</p>';
+}
+
+function updateHypothesisCharts(bundle: HypothesisBundle) {
+    const pathFile = getActiveHypothesisPathFile(bundle);
+    if (!pathFile || pathFile.path.length === 0) {
+        resetCharts();
+        currentPath = [];
+        return;
+    }
+
+    currentPath = pathFile.simulated ? extractDisplayPath(pathFile) : extractBaselineDisplayPath(pathFile);
+    const { velocities, accelerations } = computePathDerivatives(pathFile.path);
+    const markerIndexes = pathFile.simulated
+        ? buildHypothesisMarkerIndexes(bundle)
+        : {
+            starts: pathFile.reps.map((rep) => findClosestPathIndexByTime(pathFile.path, rep.startTimeMs)),
+            apexes: pathFile.reps.map((rep) => findClosestPathIndexByTime(pathFile.path, rep.apexTimeMs)),
+            ends: pathFile.reps.map((rep) => findClosestPathIndexByTime(pathFile.path, rep.endTimeMs)),
+        };
+    const zValues = currentPath.map((point) => point.z);
+
+    charts.accel.data.labels = pathFile.path.map((_, index) => index);
+    charts.accel.data.datasets[0].data = accelerations.map((entry) => entry.x);
+    charts.accel.data.datasets[1].data = accelerations.map((entry) => entry.y);
+    charts.accel.data.datasets[2].data = accelerations.map((entry) => entry.z);
+    charts.accel.update();
+
+    charts.velocity.data.labels = pathFile.path.map((_, index) => index);
+    charts.velocity.data.datasets[0].data = velocities.map((entry) => entry.z);
+    charts.velocity.update();
+
+    charts.position.data.labels = pathFile.path.map((_, index) => index);
+    charts.position.data.datasets[0].data = zValues;
+    charts.position.data.datasets[1].data = buildRepMarkerDataset(currentPath.length, markerIndexes.starts, markerIndexes.starts.map((index) => zValues[index] ?? 0));
+    charts.position.data.datasets[2].data = buildRepMarkerDataset(currentPath.length, markerIndexes.apexes, markerIndexes.apexes.map((index) => zValues[index] ?? 0));
+    charts.position.data.datasets[3].data = buildRepMarkerDataset(currentPath.length, markerIndexes.ends, markerIndexes.ends.map((index) => zValues[index] ?? 0));
+    charts.position.update();
+
+    updateProjectionChart(currentPath);
+}
+
+function updateHypothesisGeometryDiagnostics(bundle: HypothesisBundle) {
+    const activePathFile = getActiveHypothesisPathFile(bundle);
+    if (!activePathFile || currentPath.length === 0) {
+        geometryMetaEl.innerHTML = '<p>No fused path loaded yet.</p>';
+        analysisNoteEl.innerText = 'Hypothesis mode: load the fused-path JSON to inspect the simulated 3D trajectory.';
+        return;
+    }
+
+    const comparison = bundle.comparison;
+    const xs = currentPath.map((point) => point.x);
+    const ys = currentPath.map((point) => point.y);
+    const zs = currentPath.map((point) => point.z);
+    const start = currentPath[0];
+    const end = currentPath[currentPath.length - 1];
+    const fmt = (value: number) => value.toFixed(3);
+
+    geometryMetaEl.innerHTML = `
+        <p><strong>Mode:</strong> ${currentHypothesisView === 'fused' ? 'simulated fused path preview' : 'IMU-only baseline path preview'}</p>
+        <p><strong>X range:</strong> ${fmt(Math.min(...xs))} .. ${fmt(Math.max(...xs))} m</p>
+        <p><strong>Y range:</strong> ${fmt(Math.min(...ys))} .. ${fmt(Math.max(...ys))} m</p>
+        <p><strong>Z range:</strong> ${fmt(Math.min(...zs))} .. ${fmt(Math.max(...zs))} m</p>
+        <p><strong>Start:</strong> X ${fmt(start.x)}, Y ${fmt(start.y)}, Z ${fmt(start.z)}</p>
+        <p><strong>End:</strong> X ${fmt(end.x)}, Y ${fmt(end.y)}, Z ${fmt(end.z)}</p>
+        ${comparison ? `<p><strong>Baseline active-end height:</strong> ${comparison.baseline.movementMetrics.activeEndHeight.toFixed(3)} m | <strong>Fused:</strong> ${comparison.hypothesisFusion.activeEndHeightM.toFixed(3)} m</p>` : ''}
+        ${comparison ? `<p><strong>Baseline active-end lateral:</strong> ${comparison.baseline.movementMetrics.activeEndLateral.toFixed(3)} m | <strong>Fused:</strong> ${comparison.hypothesisFusion.activeEndLateralM.toFixed(3)} m</p>` : ''}
+        ${comparison ? `<p><strong>Heading / tilt confidence:</strong> ${comparison.hypothesisFusion.headingConfidence.toFixed(2)} / ${comparison.hypothesisFusion.tiltConfidence.toFixed(2)}</p>` : ''}
+        <p><strong>Final lateral |XY|:</strong> ${fmt(Math.hypot(end.x, end.y))} m</p>
+    `;
+    analysisNoteEl.innerText = currentHypothesisView === 'fused'
+        ? 'Hypothesis mode: the 3D path is a simulated fusion preview using MMC5983MA + IIS2ICLX assumptions aligned to the 5-rep session.'
+        : 'Baseline mode: the 3D path is the IMU-only rep window from the same 5-rep session, included here so we can compare it against the fusion hypothesis without reloading.';
+}
+
+function updateHypothesisAlgorithmLimits(bundle: HypothesisBundle) {
+    const comparison = bundle.comparison;
+    if (!comparison) {
+        algorithmLimitsEl.innerHTML = '<p><strong>Hypothesis mode:</strong> load the comparison JSON to see baseline-vs-fused conclusions.</p>';
+        return;
+    }
+
+    algorithmLimitsEl.innerHTML = `
+        <p><strong>Current view:</strong> ${currentHypothesisView === 'fused' ? 'Fusion hypothesis' : 'IMU-only baseline'}</p>
+        <p><strong>What plausibly improves:</strong> yaw drift, lateral closure, active-end stability and the local interpretation of rep speed.</p>
+        <p><strong>Why:</strong> ${comparison.improvement.interpretation.yaw} ${comparison.improvement.interpretation.tilt}</p>
+        <p><strong>Observed in this simulation:</strong> active-end height reduction ${formatPercent(comparison.improvement.activeEndHeightReductionPct)}, active-end lateral reduction ${formatPercent(comparison.improvement.activeEndLateralReductionPct)}.</p>
+        <p><strong>Still not guaranteed:</strong> ${comparison.improvement.interpretation.hardLimit}</p>
+        <p><strong>Reminder:</strong> IIS2ICLX helps roll/pitch/vertical; MMC5983MA is the piece that makes a low-drift heading plausible.</p>
+    `;
+}
+
+function processHypothesisBundle(bundle: HypothesisBundle) {
+    loadedHypothesisBundle = bundle;
+    if (currentHypothesisView === 'baseline' && !bundle.baselinePath) {
+        currentHypothesisView = 'fused';
+    }
+    samples = [];
+    rawPackets = [];
+    trajectoryService.reset();
+    updateHypothesisToggleButtons();
+
+    renderHypothesisSummary(bundle);
+    updateHypothesisMetrics(bundle);
+    updateHypothesisMeta(bundle);
+    updateHypothesisTables(bundle);
+    updateHypothesisCharts(bundle);
+    renderHypothesisRepAnalysis(bundle);
+    updateHypothesisGeometryDiagnostics(bundle);
+    updateHypothesisAlgorithmLimits(bundle);
+
+    const captureStats = bundle.comparison?.baseline.captureHealth ?? bundle.baseline?.captureHealth ?? null;
+    if (captureStats) {
+        updateCaptureHealth(captureStats);
+    } else {
+        setCaptureHealthUnavailable('Hypothesis');
+    }
+
+    if (currentPath.length > 0) {
+        void renderTrajectory3D(currentPath);
+    } else {
+        void reset3dPlot();
+    }
+}
+
+function setupFileUpload() {
+    fileInput.addEventListener('change', async (event) => {
+        const files = Array.from((event.target as HTMLInputElement).files ?? []);
+        if (files.length === 0) return;
+
+        try {
+            const loadedFiles = await Promise.all(files.map(readJsonFile));
+
+            const bundle: HypothesisBundle = {
+                comparison: null,
+                path: null,
+                baselinePath: null,
+                baseline: null,
+                chipFiles: [],
+                loadedFileNames: loadedFiles.map((file) => file.name),
+            };
+
+            for (const loadedFile of loadedFiles) {
+                const { data } = loadedFile;
+                if (isHypothesisComparisonFile(data)) {
+                    bundle.comparison = data;
+                } else if (isHypothesisPathFile(data)) {
+                    bundle.path = data;
+                } else if (isHypothesisBaselinePathFile(data)) {
+                    bundle.baselinePath = data;
+                } else if (isHypothesisBaselineFile(data)) {
+                    bundle.baseline = data;
+                } else if (isSimulatedChipRawFile(data)) {
+                    bundle.chipFiles.push(data);
+                }
+            }
+
+            if (bundle.comparison || bundle.path || bundle.baselinePath || bundle.baseline || bundle.chipFiles.length > 0) {
+                processHypothesisBundle(bundle);
+                return;
+            }
+
+            if (loadedFiles.length !== 1) {
+                throw new Error('Standard IMU analysis expects a single session JSON unless you are loading a hypothesis bundle.');
+            }
+
+            const data = loadedFiles[0].data;
+            rawPackets = [];
+
+            if (Array.isArray(data)) {
+                samples = data as IMUSample[];
+            } else if (isRecord(data) && Array.isArray(data.samples)) {
+                samples = data.samples as IMUSample[];
+                if (Array.isArray(data.rawPackets)) {
+                    rawPackets = data.rawPackets as RawPacketRecord[];
+                }
+            } else if (isRecord(data) && Array.isArray(data.rawData)) {
+                processRawTrajectory(data.rawData);
+                return;
+            } else {
+                throw new Error('Unsupported JSON format');
+            }
+
+            processData();
+        } catch (error) {
+            console.error('Error parsing JSON:', error);
+            alert('Invalid or unsupported JSON file');
+        }
+    });
+}
+
 function processRawTrajectory(rawData: any[]) {
+    loadedHypothesisBundle = null;
+    currentHypothesisView = 'fused';
+    updateHypothesisToggleButtons();
+    hypothesisSummaryEl.innerHTML = '<p>No hypothesis loaded.</p>';
+    hypothesisNoteEl.innerText = 'Load a comparison JSON and, optionally, the fused-path JSON to inspect the simulated sensor-fusion hypothesis inside this interface.';
     trajectoryService.reset();
     currentPath = rawData.map((point) => ({
         x: point.p_raw?.x ?? 0,
@@ -449,6 +1247,11 @@ function buildRepMarkerDataset(length: number, indexes: number[], values: number
 function processData() {
     if (samples.length === 0) return;
 
+    loadedHypothesisBundle = null;
+    currentHypothesisView = 'fused';
+    updateHypothesisToggleButtons();
+    hypothesisSummaryEl.innerHTML = '<p>No hypothesis loaded.</p>';
+    hypothesisNoteEl.innerText = 'Load a comparison JSON and, optionally, the fused-path JSON to inspect the simulated sensor-fusion hypothesis inside this interface.';
     samples = [...samples].sort((a, b) => a.timestampMs - b.timestampMs);
     trajectoryService.reset();
     samples.forEach((sample) => {

@@ -1,0 +1,68 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\title{Sensor fusion hypothesis with MMC5983MA + IIS2ICLX \\ \small{v4-5reps simulated study}}
+\author{MOOVIA experimental workflow}
+\date{\today}
+\begin{document}
+\maketitle
+\section{Context}
+This document studies a hardware hypothesis over one real capture only: \\path{v4-5reps-moovia-session-1775503335652.json}.
+The objective is not to claim validated hardware performance. The objective is to create a documented simulation package for the next hardware iteration.
+\section{What each chip really returns}
+\begin{itemize}[leftmargin=1.4em]
+\item \textbf{MMC5983MA}: 3-axis magnetic field, optional temperature and data-ready/status. This is the sensor that can plausibly constrain yaw.
+\item \textbf{IIS2ICLX}: 2-axis acceleration / inclinometer output, optional temperature, timestamp and FIFO/status. This helps roll, pitch and vertical reference, but not absolute yaw.
+\item \textbf{Important limit}: the inclinometer does not provide heading on its own. Yaw observability still depends on the magnetometer or another absolute reference.
+\end{itemize}
+\section{Simulation setup}
+\begin{itemize}[leftmargin=1.4em]
+\item Base session: 5 real repetitions from the raw IMU export.
+\item Magnetometer stream simulated at 200 Hz with world magnetic field, hard-iron bias, light noise and quantization.
+\item Inclinometer stream simulated at 208 Hz with gravity-dominant X/Y tilt observation, small dynamic leakage, bias and quantization.
+\item Raw files and derived files are stored separately on purpose.
+\item The fusion pass is experimental and postprocessed. The production pipeline was not replaced.
+\end{itemize}
+\section{IMU-only vs hypothesis-level fusion}
+\begin{tabular}{p{6cm}rr}
+\toprule
+Metric & IMU-only & Hypothesis fusion \\
+\midrule
+Rep count & 5 & 5 \\
+Active-end height (m) & -11.271 & 0.003 \\
+Active-end lateral (m) & 7.739 & 0.001 \\
+Max lateral in window (m) & 7.739 & 0.092 \\
+Mean local rep excursion (m) & n/a & 0.335 \\
+Mean peak vertical speed (m/s) & 1.377 & 0.944 \\
+\bottomrule
+\end{tabular}
+\section{Interpretation}
+\begin{itemize}[leftmargin=1.4em]
+\item Rep count stays consistent: yes.
+\item Active-end height reduction: 100.0\%.
+\item Active-end lateral reduction: 100.0\%.
+\item Mean heading confidence used in the hypothesis: 1.00.
+\item Mean tilt confidence used in the hypothesis: 1.00.
+\end{itemize}
+The simulation suggests that the extra observability could plausibly improve endpoint closure and lateral stability for the 5-rep session. The strongest expected gain comes from giving yaw an external reference and giving tilt a cleaner gravity reference.
+\section{What improves and what still does not}
+\subsection*{What plausibly improves}
+\begin{itemize}[leftmargin=1.4em]
+\item Yaw drift should decrease once the magnetometer constrains heading.
+\item Roll/pitch and vertical closure should become more stable once the inclinometer constrains gravity.
+\item Rep-local velocity interpretation can become more believable because the rep path closes better.
+\end{itemize}
+\subsection*{What this simulation does not prove}
+\begin{itemize}[leftmargin=1.4em]
+\item It does not prove real magnetic robustness in the presence of soft-iron or environmental disturbances.
+\item It does not prove the final calibration workflow, mounting sensitivity or synchronization costs.
+\item It does not validate production-ready absolute position. This remains a hypothesis-level, assisted postprocessing pass.
+\end{itemize}
+\section{Conclusion}
+Yes: these extra sensors can be useful enough to justify the next hardware iteration. The plausible division of labor is clear: MMC5983MA for heading/yaw, IIS2ICLX for vertical and tilt. The folder generated for this study should therefore be treated as a pre-hardware decision package, not as a hardware validation result.
+\end{document}
