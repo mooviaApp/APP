@@ -115,24 +115,26 @@ export function rawToAccel(raw: number): number {
 /**
  * Decode IMU sample data packet with 15 samples (each includes a hardware timestamp)
  *
- * Packet structure (211 bytes):
+ * Packet structure (213 bytes):
  * - Byte 0: Message type (0x02)
- * - Bytes 1-14: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE, hwTs as uint16 LE)
- * - Bytes 15-28: Sample 2
+ * - Bytes 1-2: Packet sequence (seq16, uint16 LE)
+ * - Bytes 3-16: Sample 1 (ax, ay, az, gx, gy, gz as int16 LE, hwTs as uint16 LE)
+ * - Bytes 17-30: Sample 2
  * - ... (continues for 15 samples total)
- * - Bytes 197-210: Sample 15
+ * - Bytes 199-212: Sample 15
  *
  * @param bytes - Raw byte array from BLE notification
  * @returns Array of 15 decoded IMU samples with physical units and timestamps
  */
 export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
     // Dynamic Packet Size Handling
-    const payloadSize = bytes.length - 1;
-    const BYTES_PER_SAMPLE = 14; // Updated for V2 (includes timestamp)
+    const HEADER_SIZE = SENSOR_CONFIG.HEADER_SIZE_BYTES;
+    const BYTES_PER_SAMPLE = SENSOR_CONFIG.BYTES_PER_SAMPLE;
+    const payloadSize = bytes.length - HEADER_SIZE;
 
     // Check payload validity
     if (payloadSize % BYTES_PER_SAMPLE !== 0) {
-        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (Payload ${payloadSize} not multiple of ${BYTES_PER_SAMPLE})`);
+        console.warn(`[BLE-ERR] Invalid IMU packet length: ${bytes.length} (Sample payload ${payloadSize} not multiple of ${BYTES_PER_SAMPLE})`);
         return [];
     }
 
@@ -152,7 +154,7 @@ export function decodeIMUPacket(bytes: Uint8Array): IMUSample[] {
 
     // 1. Parse Bytes
     for (let i = 0; i < sampleCount; i++) {
-        const offset = 1 + (i * BYTES_PER_SAMPLE);
+        const offset = HEADER_SIZE + (i * BYTES_PER_SAMPLE);
 
         const rawAx = readInt16LE(bytes, offset + 0);
         const rawAy = readInt16LE(bytes, offset + 2);

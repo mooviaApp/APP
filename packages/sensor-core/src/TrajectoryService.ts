@@ -284,9 +284,20 @@ export class TrajectoryService {
     private baselineP: Vec3 = { x: 0, y: 0, z: 0 };
     // Real‑time streaming flag: if false, path is not updated and zero
     private realtimeEnabled: boolean = false;
-    // Gravity estimation using low-pass filter (for instantaneous gravity compensation)
+    // World-frame gravity estimate updated by a continuous EMA on the rotated
+    // accelerometer reading. NOTE: alpha=0.98 at 1 kHz gives tau~50 ms
+    // (cutoff ~3 Hz), which overlaps with the spectral content of fast lifts
+    // and absorbs part of the linear acceleration into "gravity". A slower
+    // alpha (e.g. 0.999, tau~1 s) preserves more of the lift signal but
+    // exposes Madgwick tilt drift during continuous multi-rep sets, leading
+    // to monotonic velocity drift. Until rep-local processing (per-rep
+    // baseline reset) lands, the fast EMA acts as a partial mitigant for
+    // the orientation drift; trade-offs are documented in TDR-0007.
     private gravity_estimate: Vec3 = { x: 0, y: 0, z: 9.81 };
-    private readonly GRAVITY_ALPHA = 0.98; // Low-pass filter coefficient (98% old, 2% new)
+    private readonly GRAVITY_ALPHA = 0.98;
+    // Gyroscope bias (rad/s) estimated during static calibration. Subtracted
+    // from every w_meas before Madgwick to prevent yaw/orientation drift.
+    private gyroBias: Vec3 = { x: 0, y: 0, z: 0 };
 
     constructor(expectedHz: number = 1000) {
         this.setExpectedHz(expectedHz);
@@ -340,6 +351,7 @@ export class TrajectoryService {
         this.isStatState = false;
         // Reset gravity estimate to default [0, 0, 9.81]
         this.gravity_estimate = { x: 0, y: 0, z: this.GRAVITY };
+        this.gyroBias = { x: 0, y: 0, z: 0 };
     }
 
     /** Reset only the kinematic state (position, velocity, kalman) while
@@ -392,9 +404,9 @@ export class TrajectoryService {
             z: sample.az * this.GRAVITY,
         };
         const w_meas: Vec3 = {
-            x: sample.gx * (Math.PI / 180),
-            y: sample.gy * (Math.PI / 180),
-            z: sample.gz * (Math.PI / 180),
+            x: sample.gx * (Math.PI / 180) - this.gyroBias.x,
+            y: sample.gy * (Math.PI / 180) - this.gyroBias.y,
+            z: sample.gz * (Math.PI / 180) - this.gyroBias.z,
         };
 
         // Initialize orientation using either calibration buffer or the
@@ -407,17 +419,22 @@ export class TrajectoryService {
             // If calibrationBuffer contains data, compute average accel
             if (this.calibrationBuffer.length > 0) {
                 let sumAx = 0, sumAy = 0, sumAz = 0;
+                let sumGx = 0, sumGy = 0, sumGz = 0;
                 for (const s of this.calibrationBuffer) {
                     sumAx += s.ax * this.GRAVITY;
                     sumAy += s.ay * this.GRAVITY;
                     sumAz += s.az * this.GRAVITY;
+                    sumGx += s.gx * (Math.PI / 180);
+                    sumGy += s.gy * (Math.PI / 180);
+                    sumGz += s.gz * (Math.PI / 180);
                 }
                 const n = this.calibrationBuffer.length;
                 const avgAx = sumAx / n;
                 const avgAy = sumAy / n;
                 const avgAz = sumAz / n;
                 qInit = this.getRotationFromGravity(avgAx, avgAy, avgAz);
-                console.log('[Hybrid] Initial orientation computed from calibration buffer');
+                this.gyroBias = { x: sumGx / n, y: sumGy / n, z: sumGz / n };
+                console.log(`[Hybrid] Initial orientation + gyro bias computed from calibration buffer (n=${n}, bias rad/s=(${this.gyroBias.x.toFixed(5)},${this.gyroBias.y.toFixed(5)},${this.gyroBias.z.toFixed(5)}))`);
                 // Clear calibration buffer after use
                 this.calibrationBuffer = [];
             } else {
@@ -428,6 +445,11 @@ export class TrajectoryService {
             this.q = qInit;
             this.madgwick.setQuaternion(qInit);
             this.isOrientationInitialized = true;
+            // After re-init, the world frame is freshly aligned with gravity
+            // (Z-up by construction), so the EMA gravity estimate must be
+            // reset to (0,0,g) to avoid carrying a stale value from the
+            // previous world frame into the new one.
+            this.gravity_estimate = { x: 0, y: 0, z: this.GRAVITY };
             // Reset kinematics when orientation is initialised to avoid
             // integrating stale data. Preserve raw data buffer.
             this.resetKinematics();
@@ -509,15 +531,25 @@ export class TrajectoryService {
             this.madgwick.setQuaternion(this.q);
         }
 
-        // Update orientation with Madgwick (for visualization only, not used for gravity compensation)
+        // Madgwick orientation update. The accel correction is left always
+        // on: during fast multi-rep sets the sensor rarely sees enough
+        // continuous rest for an isStat-gated correction to recover
+        // accumulated gyro-only tilt. Beta=0.033 is small enough that
+        // sustained linear acceleration only mildly biases orientation;
+        // any residual tilt is absorbed by the slow gravity EMA below.
         this.madgwick.update(w_meas.x, w_meas.y, w_meas.z, a_meas.x, a_meas.y, a_meas.z, dt);
         this.q = { ...this.madgwick.q };
 
-        // NEW APPROACH: Instantaneous gravity estimation using low-pass filter
-        // Rotate measured acceleration to world frame before gravity removal
+        // Gravity estimation: rotate the measured specific force to the world
+        // frame and update the EMA. See GRAVITY_ALPHA above for the
+        // tau/cutoff trade-off. The estimate is updated every sample (no
+        // gating by stationarity): replay experiments showed that gating
+        // freezes the estimate in the wrong world frame whenever Madgwick
+        // drifts during fast continuous sets, producing catastrophic
+        // velocity/position runaway. Until rep-local processing lands the
+        // continuous EMA is the safer baseline.
         const a_world = QuatMath.rotate(this.q, a_meas);
 
-        // Update gravity estimate in world frame with exponential moving average
         const alpha = this.GRAVITY_ALPHA;
         this.gravity_estimate.x = alpha * this.gravity_estimate.x + (1 - alpha) * a_world.x;
         this.gravity_estimate.y = alpha * this.gravity_estimate.y + (1 - alpha) * a_world.y;
@@ -717,10 +749,14 @@ export class TrajectoryService {
         // Compute average acceleration from calibration buffer
         if (this.calibrationBuffer.length > 0) {
             let sumAx = 0, sumAy = 0, sumAz = 0;
+            let sumGx = 0, sumGy = 0, sumGz = 0;
             for (const s of this.calibrationBuffer) {
                 sumAx += s.ax * this.GRAVITY;
                 sumAy += s.ay * this.GRAVITY;
                 sumAz += s.az * this.GRAVITY;
+                sumGx += s.gx * (Math.PI / 180);
+                sumGy += s.gy * (Math.PI / 180);
+                sumGz += s.gz * (Math.PI / 180);
             }
             const n = this.calibrationBuffer.length;
             const avgAx = sumAx / n;
@@ -729,8 +765,10 @@ export class TrajectoryService {
             const qInit = this.getRotationFromGravity(avgAx, avgAy, avgAz);
             this.q = qInit;
             this.madgwick.setQuaternion(qInit);
+            this.gyroBias = { x: sumGx / n, y: sumGy / n, z: sumGz / n };
+            this.gravity_estimate = { x: 0, y: 0, z: this.GRAVITY };
             this.isOrientationInitialized = true;
-            console.log('[Hybrid] Calibration complete. Orientation initialised.');
+            console.log(`[Hybrid] Calibration complete. Orientation initialised. Gyro bias rad/s=(${this.gyroBias.x.toFixed(5)},${this.gyroBias.y.toFixed(5)},${this.gyroBias.z.toFixed(5)})`);
             // Anchor timestamp to last calibration sample to avoid \"large gap\" reset on next packet
             const lastCalTs = this.calibrationBuffer[this.calibrationBuffer.length - 1]?.timestampMs;
             this.lastTimestamp = lastCalTs ?? Date.now();
@@ -820,8 +858,12 @@ export class TrajectoryService {
 
     /**
      * Calcula la Velocidad Media Propulsiva (VMP) de la sesión grabada.
-     * Según la literatura (Badillo), es la media de la velocidad durante 
-     * la fase concéntrica donde la aceleración es >= -g.
+     * Según Sánchez-Medina/Badillo: media de la velocidad vertical durante la
+     * fase propulsiva, definida como la sub-fase concéntrica (vZ > 0) en la que
+     * la aceleración cinemática vertical es >= -g (i.e. el atleta sigue
+     * aplicando fuerza por encima de la caída libre). En las variables de este
+     * pipeline, acc_net.z ya es la aceleración cinemática (gravedad restada),
+     * por lo que el criterio se traduce directamente en acc_net.z >= -GRAVITY.
      */
     public getMeanPropulsiveVelocity(): number {
         if (!this.rawDataBuffer || this.rawDataBuffer.length === 0) return 0;
@@ -830,12 +872,10 @@ export class TrajectoryService {
         let count = 0;
 
         for (const sample of this.rawDataBuffer) {
-            const vZ = sample.v_raw.z; // Velocidad vertical (Z-up en física)
-            const aZ = sample.acc_net.z; // Aceleración lineal neta (sin gravedad)
+            const vZ = sample.v_raw.z;
+            const aZ = sample.acc_net.z;
 
-            // Fase concéntrica: la barra sube (vZ > 0)
-            // Filtramos un umbral de ruido para vZ y verificamos aceleración
-            if (vZ > 0.05) {
+            if (vZ > 0.05 && aZ >= -this.GRAVITY) {
                 sumVelocity += vZ;
                 count++;
             }
@@ -845,18 +885,35 @@ export class TrajectoryService {
     }
 
     /**
-     * Devuelve la altura máxima alcanzada durante el levantamiento.
+     * Devuelve la altura máxima (eje Z mundo) alcanzada durante el
+     * levantamiento, relativa al primer punto registrado. Si la `path`
+     * realtime está vacía (caso típico cuando realtimeEnabled=false y aún
+     * no se ha llamado a applyPostProcessingCorrections), recurre al
+     * rawDataBuffer interno para que la métrica nunca devuelva 0 por
+     * desincronía de contrato.
      */
     public getMaxHeight(): number {
-        if (this.path.length === 0) return 0;
-        let maxZ = 0;
-        for (const pt of this.path) {
-            // En el objeto path, relativaPosition ya está calculada
-            if (pt.relativePosition.z > maxZ) {
-                maxZ = pt.relativePosition.z;
+        if (this.path.length > 0) {
+            let maxZ = 0;
+            for (const pt of this.path) {
+                if (pt.relativePosition.z > maxZ) {
+                    maxZ = pt.relativePosition.z;
+                }
             }
+            return maxZ;
         }
-        return maxZ;
+
+        if (this.rawDataBuffer.length > 0) {
+            const baselineZ = this.rawDataBuffer[0].p_raw.z;
+            let maxZ = 0;
+            for (const r of this.rawDataBuffer) {
+                const dz = r.p_raw.z - baselineZ;
+                if (dz > maxZ) maxZ = dz;
+            }
+            return maxZ;
+        }
+
+        return 0;
     }
 }
 

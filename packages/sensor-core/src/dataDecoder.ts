@@ -75,15 +75,16 @@ function deltaTicks16(prev: number, curr: number) {
  * Returns array of decoded IMU samples with physical units and timestamps
  */
 export function decodeIMUPacket(bytes: Uint8Array | number[]): IMUSample[] {
-    const payloadSize = bytes.length - 1;
-    const BYTES_PER_SAMPLE = 14;
+    const headerSize = SENSOR_CONFIG.HEADER_SIZE_BYTES;
+    const bytesPerSample = SENSOR_CONFIG.BYTES_PER_SAMPLE;
+    const payloadSize = bytes.length - headerSize;
 
-    if (payloadSize % BYTES_PER_SAMPLE !== 0) {
+    if (payloadSize % bytesPerSample !== 0) {
         console.warn(`[Decoder] Invalid IMU packet length: ${bytes.length}`);
         return [];
     }
 
-    const sampleCount = payloadSize / BYTES_PER_SAMPLE;
+    const sampleCount = payloadSize / bytesPerSample;
 
     if (bytes[0] !== MESSAGE_TYPES.SAMPLE) {
         console.warn(`[Decoder] Invalid message type: 0x${bytes[0].toString(16)}`);
@@ -97,7 +98,7 @@ export function decodeIMUPacket(bytes: Uint8Array | number[]): IMUSample[] {
     }[] = [];
 
     for (let i = 0; i < sampleCount; i++) {
-        const offset = 1 + (i * BYTES_PER_SAMPLE);
+        const offset = headerSize + (i * bytesPerSample);
         parsedRaw.push({
             ax: rawToAccel(readInt16LE(bytes, offset + 0)),
             ay: rawToAccel(readInt16LE(bytes, offset + 2)),

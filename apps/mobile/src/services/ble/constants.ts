@@ -45,7 +45,7 @@ export const BLE_COMMANDS = {
 // ============================================================================
 
 export const MESSAGE_TYPES = {
-    /** IMU sample data packet (181 bytes: type + 15 samples × 12 bytes) */
+    /** IMU sample data packet */
     SAMPLE: 0x02,
 
     /** Log message (ASCII text) */
@@ -78,11 +78,17 @@ export const SENSOR_CONFIG = {
     /** Number of samples per BLE packet from firmware */
     SAMPLES_PER_PACKET: 15,
 
+    /** Bytes before sample payload (1 byte type + 2 byte seq16) */
+    HEADER_SIZE_BYTES: 3,
+
+    /** Packet sequence counter bytes */
+    SEQUENCE_BYTES: 2,
+
     /** Bytes per sample (6 int16 values + 1 uint16 timestamp = 14 bytes) */
     BYTES_PER_SAMPLE: 14,
 
-    /** Total packet size (1 byte type + 15 samples × 14 bytes) */
-    PACKET_SIZE_BYTES: 211,
+    /** Total packet size (1 byte type + 2 byte seq16 + 15 samples × 14 bytes) */
+    PACKET_SIZE_BYTES: 213,
 
     /** Expected sample interval in ms (1 ms per sample) */
     SAMPLE_INTERVAL_MS: 1,
@@ -105,7 +111,7 @@ export const SENSOR_CONFIG = {
 // ============================================================================
 
 export const BLE_CONFIG = {
-    /** Required MTU size for 211-byte packets (211 + 3 bytes overhead + margin) */
+    /** Required MTU size for 213-byte packets (213 + 3 bytes ATT overhead + margin) */
     REQUIRED_MTU: 247,
 
     /** Scan timeout in milliseconds */
